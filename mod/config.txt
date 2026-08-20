@@ -1,0 +1,36 @@
+# Syx Kingdoms Online client configuration
+# Online play is exclusive: disable every other mod before launching a city.
+
+ENABLED = true
+SERVER_HOST = 127.0.0.1
+SERVER_PORT = 49720
+# Fixed canonical world; changing this value blocks the client from starting.
+WORLD_ID = syx-kingdoms-one-world
+
+# Every player should choose a display name and city name.
+PLAYER_NAME = New Ruler
+CITY_NAME = New City
+
+# Identity is generated once in the Songs of Syx application-data folder.
+# Set RESET_IDENTITY = true for one launch only if you intentionally need a new city.
+RESET_IDENTITY = false
+
+# The server is authoritative for online time. 1.0 is normal speed.
+# This local value is only a safe fallback until the server welcomes the client.
+FALLBACK_FIXED_SPEED = 1.0
+
+# Networking and UI summary cadence.
+HEARTBEAT_MILLIS = 2000
+CONNECT_TIMEOUT_MILLIS = 5000
+
+# Local development uses raw loopback TCP. A public server must set USE_TLS=true.
+# Java validates the certificate chain and SERVER_HOST name. An optional leaf
+# certificate SHA-256 pin adds another identity check (64 hexadecimal characters).
+USE_TLS = false
+TLS_CERTIFICATE_SHA256 =
+SHOW_OVERLAY = true
+OVERLAY_MAX_CITIES = 6
+SHOW_WORLD_MAP = true
+WORLD_MAP_WIDTH = 480
+WORLD_MAP_HEIGHT = 480
+DEBUG = true

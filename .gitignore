@@ -1,0 +1,9 @@
+build/
+*.class
+*.jar
+*.log
+server-data/
+backups/
+.idea/
+.vscode/
+reference/

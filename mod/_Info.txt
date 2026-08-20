@@ -1,0 +1,7 @@
+VERSION: "0.5.0",
+GAME_VERSION_MAJOR: 71,
+GAME_VERSION_MINOR: 44,
+NAME: "Syx Kingdoms Online",
+DESC: "Persistent online kingdoms with one 10x world, chat, diplomacy, trade, armies, and server-owned strategy state.",
+AUTHOR: "Fortukiing",
+INFO: "Experimental development build. Back up saves before testing.",

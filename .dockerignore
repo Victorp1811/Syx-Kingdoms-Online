@@ -1,0 +1,8 @@
+.git
+.github
+build
+backups
+reference
+server-data
+*.jar
+*.class

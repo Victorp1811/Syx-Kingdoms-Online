@@ -1,0 +1,14 @@
+services:
+  syx-kingdoms:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:49720:49720"
+    volumes:
+      - ./server-data:/app/server-data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
