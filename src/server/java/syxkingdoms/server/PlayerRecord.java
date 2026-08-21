@@ -1,5 +1,7 @@
 package syxkingdoms.server;
 
+import syxkingdoms.protocol.CrestDesign;
+
 final class PlayerRecord {
     final String playerId;
     final String authHash;
@@ -7,7 +9,10 @@ final class PlayerRecord {
     final int x;
     final int y;
     String playerName;
+    String kingdomName;
     String cityName;
+    long foundedEpochMillis;
+    long protectionEndsEpochMillis;
     String gameVersion;
     String modVersion;
     int population;
@@ -17,6 +22,8 @@ final class PlayerRecord {
     int levies = 100;
     long economyUpdatedEpochMillis = System.currentTimeMillis();
     int levyProgressMinutes;
+    CrestDesign crest;
+    long crestRevision;
 
     PlayerRecord(String playerId, String authHash, int slot, int x, int y) {
         this.playerId = playerId;
@@ -24,5 +31,9 @@ final class PlayerRecord {
         this.slot = slot;
         this.x = x;
         this.y = y;
+    }
+
+    boolean foundingComplete() {
+        return kingdomName != null && !kingdomName.isBlank() && foundedEpochMillis > 0;
     }
 }

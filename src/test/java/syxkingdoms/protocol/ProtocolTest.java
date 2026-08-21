@@ -7,9 +7,10 @@ import java.util.List;
 
 public final class ProtocolTest {
     public static void main(String[] args) throws Exception {
-        Messages.Hello hello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.5.0",
-                "Syx Kingdoms Online@0.5.0", 0, "world-one",
-                "player-123", "a-secure-token-that-is-long-enough", "Ruler\tName", "Cité 北");
+        Messages.Hello hello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
+                "Syx Kingdoms Online@0.9.0", 0, 0, "world-one",
+                "player-123", "a-secure-token-that-is-long-enough", "Ruler Name",
+                "Northern Realm", "Cité 北", "Friendly Realm");
         Messages.Hello decoded = Messages.Hello.decode(hello.encode());
         equal(hello, decoded, "hello round trip");
 
@@ -19,8 +20,10 @@ public final class ProtocolTest {
 
         Messages.WorldState state = new Messages.WorldState(42, 123456789L, 1.0,
                 SharedWorld.WIDTH, SharedWorld.HEIGHT, "test-seed", List.of(
-                new Messages.City("p1", "Alice", "Oak", 0, 0, 123, 456, true, 1000),
-                new Messages.City("p2", "Bob", "Ash", 1, 0, 987, -20, false, 2000)));
+                new Messages.City("p1", "Alice", "Oak Realm", "Oak", 0, 0,
+                        123, 456, true, 1000, 9000),
+                new Messages.City("p2", "Bob", "Ash Realm", "Ash", 1, 0,
+                        987, -20, false, 2000, 0)));
         List<String> frames = Messages.WorldState.encodeFrames(state);
         Messages.WorldState.Header header = Messages.WorldState.decodeHeader(frames.getFirst());
         Messages.WorldState rebuilt = header.withCities(List.of(
@@ -30,7 +33,7 @@ public final class ProtocolTest {
 
         Messages.Command command = new Messages.Command("command-123", "MAIL", "p2", "", 12, 34, "hello");
         equal(command, Messages.Command.decode(command.encode()), "command round trip");
-        Messages.ClientUpdate update = new Messages.ClientUpdate(7, 100, 200, 6, List.of(command));
+        Messages.ClientUpdate update = new Messages.ClientUpdate(7, 100, 200, 6, 4, List.of(command));
         Messages.ClientUpdate.Header updateHeader = Messages.ClientUpdate.decodeHeader(update.header());
         equal(update, updateHeader.withCommands(List.of(command)), "client update round trip");
         Messages.CommandResult result = new Messages.CommandResult("command-123", true, "MAIL_SENT", "sent");
@@ -40,7 +43,7 @@ public final class ProtocolTest {
         equal(event, Messages.WorldEvent.decode(event.encode()), "event round trip");
         Messages.Relation relation = new Messages.Relation("p2", "Bob", "ALLY", "ALLY", "ALLY");
         equal(relation, Messages.Relation.decode(relation.encode()), "relation round trip");
-        Messages.PlayerState playerState = new Messages.PlayerState(999, 88);
+        Messages.PlayerState playerState = new Messages.PlayerState(999, 88, 9000);
         equal(playerState, Messages.PlayerState.decode(playerState.encode()), "player state round trip");
         Messages.Army army = new Messages.Army("army-123", "p1", "p2", 50, 1000, 2000);
         equal(army, Messages.Army.decode(army.encode()), "army round trip");
@@ -51,6 +54,20 @@ public final class ProtocolTest {
         equal(offer, Messages.MarketOffer.decode(offer.encode()), "market offer round trip");
         Messages.OffersHeader offers = new Messages.OffersHeader(12);
         equal(offers, Messages.OffersHeader.decode(offers.encode()), "offers header round trip");
+
+        CrestDesign crest = CrestDesign.blank()
+                .withColor(1, 0x123456)
+                .withColor(15, 0xFEDCBA)
+                .withPixel(0, 0, 1)
+                .withPixel(31, 31, 15);
+        equal(crest, CrestDesign.decode(crest.pixelsEncoded(), crest.paletteHex()), "crest design round trip");
+        equal(683, crest.pixelsEncoded().length(), "32x32 packed crest size");
+        equal(96, crest.paletteHex().length(), "16-color crest palette size");
+        Messages.Crest crestMessage = new Messages.Crest(3, "p1", crest.hash(),
+                crest.pixelsEncoded(), crest.paletteHex());
+        equal(crestMessage, Messages.Crest.decode(crestMessage.encode()), "crest frame round trip");
+        equal(crest.mirrorHorizontal().pixel(31, 0), 1, "horizontal crest mirror");
+        equal(crest.mirrorVertical().pixel(31, 0), 15, "vertical crest mirror");
 
         SharedWorldTerrain terrain = new SharedWorldTerrain("test-seed");
         SharedWorldTerrain sameTerrain = new SharedWorldTerrain("test-seed");
@@ -89,6 +106,10 @@ public final class ProtocolTest {
         expectProtocol(() -> Messages.Command.decode("COMMAND\tshort\tCHAT\t\t\t0\t0\t"), "bad command ID");
         expectProtocol(() -> Messages.Relation.decode("RELATION\tcDI\tQm9i\tALLY\tALLY\tINVALID"), "bad stance");
         expectProtocol(() -> Protocol.decodeText("%%%", "bad"), "invalid base64url");
+        expectProtocol(() -> CrestDesign.decode("00", crest.paletteHex()), "bad crest dimensions");
+        String badHashFrame = new Messages.Crest(3, "p1", "0".repeat(64),
+                crest.pixelsEncoded(), crest.paletteHex()).encode();
+        expectProtocol(() -> Messages.Crest.decode(badHashFrame), "mismatched crest hash");
 
         byte[] oversized = ("x".repeat(Protocol.MAX_LINE_BYTES + 1) + "\n").getBytes(StandardCharsets.UTF_8);
         expectProtocol(() -> LineIO.readLine(new ByteArrayInputStream(oversized)), "oversized frame");

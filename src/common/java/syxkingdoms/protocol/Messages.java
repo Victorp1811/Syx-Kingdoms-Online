@@ -13,11 +13,14 @@ public final class Messages {
             String modVersion,
             String modManifest,
             long lastEventId,
+            long lastCrestRevision,
             String worldId,
             String playerId,
             String authToken,
             String playerName,
-            String cityName) {
+            String kingdomName,
+            String cityName,
+            String placementReference) {
         public String encode() {
             return Protocol.frame("HELLO",
                     Integer.toString(protocolVersion),
@@ -25,26 +28,32 @@ public final class Messages {
                     Protocol.encodeText(modVersion),
                     Protocol.encodeText(modManifest),
                     Long.toString(lastEventId),
+                    Long.toString(lastCrestRevision),
                     Protocol.encodeText(worldId),
                     Protocol.encodeText(playerId),
                     Protocol.encodeText(authToken),
                     Protocol.encodeText(playerName),
-                    Protocol.encodeText(cityName));
+                    Protocol.encodeText(kingdomName),
+                    Protocol.encodeText(cityName),
+                    Protocol.encodeText(placementReference));
         }
 
         public static Hello decode(String line) throws ProtocolException {
-            String[] f = Protocol.split(line, "HELLO", 11);
+            String[] f = Protocol.split(line, "HELLO", 14);
             return new Hello(
                     Protocol.parseInt(f[1], "protocolVersion", 1, Integer.MAX_VALUE),
                     Protocol.decodeText(f[2], "gameVersion"),
                     Protocol.decodeText(f[3], "modVersion"),
                     Protocol.decodeText(f[4], "modManifest"),
                     Protocol.parseLong(f[5], "lastEventId", 0, Long.MAX_VALUE),
-                    Protocol.decodeText(f[6], "worldId"),
-                    Protocol.decodeText(f[7], "playerId"),
-                    Protocol.decodeText(f[8], "authToken"),
-                    Protocol.decodeText(f[9], "playerName"),
-                    Protocol.decodeText(f[10], "cityName"));
+                    Protocol.parseLong(f[6], "lastCrestRevision", 0, Long.MAX_VALUE),
+                    Protocol.decodeText(f[7], "worldId"),
+                    Protocol.decodeText(f[8], "playerId"),
+                    Protocol.decodeText(f[9], "authToken"),
+                    Protocol.decodeText(f[10], "playerName"),
+                    Protocol.decodeText(f[11], "kingdomName"),
+                    Protocol.decodeText(f[12], "cityName"),
+                    Protocol.decodeText(f[13], "placementReference"));
         }
     }
 
@@ -109,41 +118,47 @@ public final class Messages {
     public record City(
             String playerId,
             String playerName,
+            String kingdomName,
             String cityName,
             int x,
             int y,
             int population,
             long credits,
             boolean online,
-            long lastSeenEpochMillis) {
+            long lastSeenEpochMillis,
+            long protectionEndsEpochMillis) {
         public String encode() {
             return Protocol.frame("CITY",
                     Protocol.encodeText(playerId),
                     Protocol.encodeText(playerName),
+                    Protocol.encodeText(kingdomName),
                     Protocol.encodeText(cityName),
                     Integer.toString(x),
                     Integer.toString(y),
                     Integer.toString(population),
                     Long.toString(credits),
                     online ? "1" : "0",
-                    Long.toString(lastSeenEpochMillis));
+                    Long.toString(lastSeenEpochMillis),
+                    Long.toString(protectionEndsEpochMillis));
         }
 
         public static City decode(String line) throws ProtocolException {
-            String[] f = Protocol.split(line, "CITY", 10);
-            if (!"0".equals(f[8]) && !"1".equals(f[8])) {
+            String[] f = Protocol.split(line, "CITY", 12);
+            if (!"0".equals(f[9]) && !"1".equals(f[9])) {
                 throw new ProtocolException("BAD_BOOLEAN", "online must be 0 or 1");
             }
             return new City(
                     Protocol.decodeText(f[1], "playerId"),
                     Protocol.decodeText(f[2], "playerName"),
-                    Protocol.decodeText(f[3], "cityName"),
-                    Protocol.parseInt(f[4], "x", -1_000_000, 1_000_000),
-                    Protocol.parseInt(f[5], "y", -1_000_000, 1_000_000),
-                    Protocol.parseInt(f[6], "population", 0, 100_000_000),
-                    Protocol.parseLong(f[7], "credits", -1_000_000_000_000_000L, 1_000_000_000_000_000L),
-                    "1".equals(f[8]),
-                    Protocol.parseLong(f[9], "lastSeenEpochMillis", 0, Long.MAX_VALUE));
+                    Protocol.decodeText(f[3], "kingdomName"),
+                    Protocol.decodeText(f[4], "cityName"),
+                    Protocol.parseInt(f[5], "x", -1_000_000, 1_000_000),
+                    Protocol.parseInt(f[6], "y", -1_000_000, 1_000_000),
+                    Protocol.parseInt(f[7], "population", 0, 100_000_000),
+                    Protocol.parseLong(f[8], "credits", -1_000_000_000_000_000L, 1_000_000_000_000_000L),
+                    "1".equals(f[9]),
+                    Protocol.parseLong(f[10], "lastSeenEpochMillis", 0, Long.MAX_VALUE),
+                    Protocol.parseLong(f[11], "protectionEndsEpochMillis", 0, Long.MAX_VALUE));
         }
     }
 
@@ -206,28 +221,33 @@ public final class Messages {
             int population,
             long credits,
             long lastEventId,
+            long lastCrestRevision,
             List<Command> commands) {
         public String header() {
             return Protocol.frame("UPDATE", Long.toString(sequence), Integer.toString(population),
-                    Long.toString(credits), Long.toString(lastEventId), Integer.toString(commands.size()));
+                    Long.toString(credits), Long.toString(lastEventId), Long.toString(lastCrestRevision),
+                    Integer.toString(commands.size()));
         }
 
         public static Header decodeHeader(String line) throws ProtocolException {
-            String[] f = Protocol.split(line, "UPDATE", 6);
+            String[] f = Protocol.split(line, "UPDATE", 7);
             return new Header(
                     Protocol.parseLong(f[1], "sequence", 0, Long.MAX_VALUE),
                     Protocol.parseInt(f[2], "population", 0, 100_000_000),
                     Protocol.parseLong(f[3], "credits", -1_000_000_000_000_000L, 1_000_000_000_000_000L),
                     Protocol.parseLong(f[4], "lastEventId", 0, Long.MAX_VALUE),
-                    Protocol.parseInt(f[5], "commandCount", 0, Protocol.MAX_COMMANDS_PER_UPDATE));
+                    Protocol.parseLong(f[5], "lastCrestRevision", 0, Long.MAX_VALUE),
+                    Protocol.parseInt(f[6], "commandCount", 0, Protocol.MAX_COMMANDS_PER_UPDATE));
         }
 
-        public record Header(long sequence, int population, long credits, long lastEventId, int commandCount) {
+        public record Header(long sequence, int population, long credits, long lastEventId,
+                long lastCrestRevision, int commandCount) {
             public ClientUpdate withCommands(List<Command> commands) throws ProtocolException {
                 if (commands.size() != commandCount) {
                     throw new ProtocolException("BAD_UPDATE", "Command count does not match update header");
                 }
-                return new ClientUpdate(sequence, population, credits, lastEventId, List.copyOf(commands));
+                return new ClientUpdate(sequence, population, credits, lastEventId,
+                        lastCrestRevision, List.copyOf(commands));
             }
         }
     }
@@ -346,6 +366,56 @@ public final class Messages {
         }
     }
 
+    public record Crest(
+            long revision,
+            String playerId,
+            String hash,
+            String pixels,
+            String palette) {
+        public String encode() {
+            return Protocol.frame("CREST", Long.toString(revision), Protocol.encodeText(playerId), hash,
+                    Protocol.encodeText(pixels), Protocol.encodeText(palette));
+        }
+
+        public static Crest decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "CREST", 6);
+            long revision = Protocol.parseLong(f[1], "crestRevision", 1, Long.MAX_VALUE);
+            String playerId = Protocol.decodeText(f[2], "crestPlayerId");
+            String hash = f[3];
+            if (!hash.matches("[0-9a-f]{64}")) {
+                throw new ProtocolException("BAD_CREST", "Crest hash must be a lowercase SHA-256 digest");
+            }
+            String pixels = Protocol.decodeText(f[4], "crestPixels");
+            String palette = Protocol.decodeText(f[5], "crestPalette");
+            CrestDesign design = CrestDesign.decode(pixels, palette);
+            if (!hash.equals(design.hash())) {
+                throw new ProtocolException("BAD_CREST", "Crest hash does not match its pixel and palette data");
+            }
+            return new Crest(revision, playerId, hash, pixels, palette);
+        }
+
+        public CrestDesign design() throws ProtocolException {
+            CrestDesign design = CrestDesign.decode(pixels, palette);
+            if (!hash.equals(design.hash())) {
+                throw new ProtocolException("BAD_CREST", "Crest hash does not match its pixel and palette data");
+            }
+            return design;
+        }
+    }
+
+    public record CrestsHeader(long cursor, int crestCount) {
+        public String encode() {
+            return Protocol.frame("CRESTS", Long.toString(cursor), Integer.toString(crestCount));
+        }
+
+        public static CrestsHeader decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "CRESTS", 3);
+            return new CrestsHeader(
+                    Protocol.parseLong(f[1], "crestCursor", 0, Long.MAX_VALUE),
+                    Protocol.parseInt(f[2], "crestCount", 0, Protocol.MAX_CRESTS_PER_SYNC));
+        }
+    }
+
     public record Relation(
             String playerId,
             String playerName,
@@ -379,16 +449,18 @@ public final class Messages {
         }
     }
 
-    public record PlayerState(long crowns, int levies) {
+    public record PlayerState(long crowns, int levies, long protectionEndsEpochMillis) {
         public String encode() {
-            return Protocol.frame("PLAYER_STATE", Long.toString(crowns), Integer.toString(levies));
+            return Protocol.frame("PLAYER_STATE", Long.toString(crowns), Integer.toString(levies),
+                    Long.toString(protectionEndsEpochMillis));
         }
 
         public static PlayerState decode(String line) throws ProtocolException {
-            String[] f = Protocol.split(line, "PLAYER_STATE", 3);
+            String[] f = Protocol.split(line, "PLAYER_STATE", 4);
             return new PlayerState(
                     Protocol.parseLong(f[1], "crowns", 0, 1_000_000_000L),
-                    Protocol.parseInt(f[2], "levies", 0, 10_000));
+                    Protocol.parseInt(f[2], "levies", 0, 10_000),
+                    Protocol.parseLong(f[3], "protectionEndsEpochMillis", 0, Long.MAX_VALUE));
         }
     }
 

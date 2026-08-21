@@ -39,6 +39,8 @@ final class WorldEventRecord {
     boolean visibleTo(String playerId) {
         return "CHAT".equals(type) || "STANCE".equals(type)
                 || "ARMY_SENT".equals(type) || "BATTLE".equals(type)
+                || "KINGDOM_FOUNDED".equals(type) || "PROTECTION_ENDED".equals(type)
+                || "CREST_UPDATED".equals(type)
                 || type.startsWith("OFFER_")
                 || actorPlayerId.equals(playerId) || targetPlayerId.equals(playerId);
     }

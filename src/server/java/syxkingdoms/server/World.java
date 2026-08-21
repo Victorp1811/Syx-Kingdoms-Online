@@ -1,11 +1,14 @@
 package syxkingdoms.server;
 
 import syxkingdoms.protocol.Messages;
+import syxkingdoms.protocol.CrestDesign;
 import syxkingdoms.protocol.ProtocolException;
+import syxkingdoms.protocol.SharedWorld;
 import syxkingdoms.protocol.SharedWorldTerrain;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -15,11 +18,14 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 final class World {
     private static final int MAX_RETAINED_EVENTS = 10_000;
+    private static final Set<String> RESERVED_NAMES = Set.of(
+            "admin", "administrator", "moderator", "server", "system", "syx kingdoms");
 
     record JoinResult(PlayerRecord player, Messages.Welcome welcome) {
     }
@@ -34,6 +40,8 @@ final class World {
             List<Messages.CommandResult> commandResults,
             long eventCursor,
             List<Messages.WorldEvent> events,
+            long crestCursor,
+            List<Messages.Crest> crests,
             List<Messages.Relation> relations,
             List<Messages.Army> armies,
             List<Messages.Delivery> deliveries,
@@ -42,6 +50,7 @@ final class World {
 
     private final ServerConfig config;
     private final SharedWorldTerrain terrain;
+    private final long[] cityCoordinates;
     private final ModerationStore moderation;
     private final long epochMillis;
     private final Map<String, PlayerRecord> players = new HashMap<>();
@@ -56,21 +65,31 @@ final class World {
     private final List<MarketOfferRecord> marketOffers = new ArrayList<>();
     private int nextSlot;
     private long nextEventId;
+    private long nextCrestRevision;
     private boolean dirty;
 
     World(ServerConfig config) throws IOException {
         this.config = config;
         this.terrain = new SharedWorldTerrain(config.worldSeed());
+        this.cityCoordinates = buildCityCoordinates();
         this.moderation = new ModerationStore(config.worldFile());
         WorldStore.LoadedWorld loaded = WorldStore.load(config.worldFile(), config);
         this.epochMillis = loaded.epochMillis();
         this.nextSlot = loaded.nextSlot();
         this.nextEventId = loaded.nextEventId();
+        this.nextCrestRevision = loaded.nextCrestRevision();
+        if (nextCrestRevision < 1) {
+            throw new IOException("Persistent next crest revision is invalid");
+        }
         if (nextSlot < 0 || nextSlot > config.maxPlayers()) {
             throw new IOException("Persistent next city slot is outside the configured player capacity");
         }
         Set<String> occupiedCoordinates = new HashSet<>();
         Set<Integer> occupiedSlots = new HashSet<>();
+        Set<String> rulerNames = new HashSet<>();
+        Set<String> kingdomNames = new HashSet<>();
+        Set<String> capitalNames = new HashSet<>();
+        Set<Long> crestRevisions = new HashSet<>();
         for (PlayerRecord player : loaded.players()) {
             if (player.slot < 0 || player.slot >= loaded.nextSlot()
                     || player.x < 0 || player.x >= config.worldWidth()
@@ -90,8 +109,30 @@ final class World {
             }
             if (player.crowns < 0 || player.crowns > 1_000_000_000L
                     || player.levies < 0 || player.levies > 10_000
-                    || player.levyProgressMinutes < 0 || player.levyProgressMinutes >= 5) {
+                    || player.levyProgressMinutes < 0 || player.levyProgressMinutes >= 5
+                    || player.foundedEpochMillis < 0 || player.protectionEndsEpochMillis < 0) {
                 throw new IOException("Invalid strategic economy state for " + player.playerId);
+            }
+            if ((player.crest == null) != (player.crestRevision == 0)
+                    || player.crestRevision < 0 || player.crestRevision >= nextCrestRevision
+                    || (player.crestRevision > 0 && !crestRevisions.add(player.crestRevision))) {
+                throw new IOException("Invalid crest state for " + player.playerId);
+            }
+            if (player.foundingComplete()) {
+                try {
+                    String ruler = foundingName(player.playerName, "ruler name");
+                    String kingdom = foundingName(player.kingdomName, "kingdom name");
+                    String capital = foundingName(player.cityName, "capital name");
+                    if (!rulerNames.add(nameKey(ruler)) || !kingdomNames.add(nameKey(kingdom))
+                            || !capitalNames.add(nameKey(capital))) {
+                        throw new IOException("Duplicate founding name in world file for " + player.playerId);
+                    }
+                } catch (ProtocolException e) {
+                    throw new IOException("Invalid founding profile for " + player.playerId + ": " + e.getMessage(), e);
+                }
+            } else if ((player.kingdomName != null && !player.kingdomName.isBlank())
+                    || player.foundedEpochMillis != 0 || player.protectionEndsEpochMillis != 0) {
+                throw new IOException("Incomplete founding profile in world file for " + player.playerId);
             }
         }
         events.addAll(loaded.events());
@@ -155,8 +196,6 @@ final class World {
         if (banned) {
             throw new ProtocolException("ACCOUNT_BANNED", "This player identity is banned from the persistent world");
         }
-        String playerName = displayName(hello.playerName(), "player name");
-        String cityName = displayName(hello.cityName(), "city name");
         if (!config.requiredGameVersion().equals(hello.gameVersion())) {
             throw new ProtocolException("GAME_VERSION_MISMATCH",
                     "Server requires Songs of Syx " + config.requiredGameVersion() + ", client reported " + hello.gameVersion());
@@ -176,21 +215,40 @@ final class World {
 
         String authHash = hashToken(hello.playerId(), hello.authToken());
         PlayerRecord player = players.get(hello.playerId());
-        if (player == null) {
-            if (players.size() >= config.maxPlayers()) {
-                throw new ProtocolException("WORLD_FULL", "This world has reached its player limit");
-            }
-            int slot = nextSlot++;
-            int[] coordinate = coordinateForSlot(slot);
-            player = new PlayerRecord(hello.playerId(), authHash, slot, coordinate[0], coordinate[1]);
-            players.put(player.playerId, player);
-        } else if (!MessageDigest.isEqual(player.authHash.getBytes(StandardCharsets.US_ASCII),
+        if (player != null && !MessageDigest.isEqual(player.authHash.getBytes(StandardCharsets.US_ASCII),
                 authHash.getBytes(StandardCharsets.US_ASCII))) {
             throw new ProtocolException("AUTH_FAILED", "Authentication token does not match this player identity");
         }
 
-        player.playerName = playerName;
-        player.cityName = cityName;
+        if (player == null || !player.foundingComplete()) {
+            if (hello.playerName().isBlank() && hello.kingdomName().isBlank() && hello.cityName().isBlank()) {
+                throw new ProtocolException("FOUNDING_REQUIRED",
+                        "Found your persistent kingdom before entering the shared world");
+            }
+            String playerName = foundingName(hello.playerName(), "ruler name");
+            String kingdomName = foundingName(hello.kingdomName(), "kingdom name");
+            String cityName = foundingName(hello.cityName(), "capital name");
+            ensureFoundingNamesAvailable(player, playerName, kingdomName, cityName);
+
+            if (player == null) {
+                if (players.size() >= config.maxPlayers()) {
+                    throw new ProtocolException("WORLD_FULL", "This world has reached its player limit");
+                }
+                int[] coordinate = coordinateForFounding(hello.placementReference());
+                player = new PlayerRecord(hello.playerId(), authHash, nextSlot, coordinate[0], coordinate[1]);
+                nextSlot++;
+                players.put(player.playerId, player);
+            }
+            long now = System.currentTimeMillis();
+            player.playerName = playerName;
+            player.kingdomName = kingdomName;
+            player.cityName = cityName;
+            player.foundedEpochMillis = now;
+            player.protectionEndsEpochMillis = now + config.beginnerProtectionMillis();
+            appendSystemEvent("KINGDOM_FOUNDED", player, "", kingdomName, cityName,
+                    player.x, player.y);
+        }
+
         player.gameVersion = hello.gameVersion();
         player.modVersion = hello.modVersion();
         player.lastSeenEpochMillis = System.currentTimeMillis();
@@ -222,8 +280,13 @@ final class World {
     }
 
     synchronized SyncResult initialSync(String playerId, long afterEventId) throws ProtocolException, IOException {
+        return initialSync(playerId, afterEventId, 0);
+    }
+
+    synchronized SyncResult initialSync(String playerId, long afterEventId, long afterCrestRevision)
+            throws ProtocolException, IOException {
         requireOnlinePlayer(playerId);
-        SyncResult result = sync(playerId, afterEventId, List.of());
+        SyncResult result = sync(playerId, afterEventId, afterCrestRevision, List.of());
         save();
         return result;
     }
@@ -240,7 +303,7 @@ final class World {
         }
         heartbeat(playerId, new Messages.Heartbeat(update.sequence(), update.population(), update.credits()));
         List<Messages.CommandResult> results = applyCommands(playerId, update.commands());
-        SyncResult result = sync(playerId, update.lastEventId(), results);
+        SyncResult result = sync(playerId, update.lastEventId(), update.lastCrestRevision(), results);
         if (!update.commands().isEmpty()) {
             save();
         }
@@ -262,9 +325,10 @@ final class World {
         ordered.sort(Comparator.comparingInt(player -> player.slot));
         List<Messages.City> cities = new ArrayList<>(ordered.size());
         for (PlayerRecord player : ordered) {
-            cities.add(new Messages.City(player.playerId, player.playerName, player.cityName,
+            cities.add(new Messages.City(player.playerId, player.playerName, player.kingdomName, player.cityName,
                     player.x, player.y, player.population, player.credits,
-                    online.contains(player.playerId), player.lastSeenEpochMillis));
+                    online.contains(player.playerId), player.lastSeenEpochMillis,
+                    player.protectionEndsEpochMillis));
         }
         return new Messages.WorldState(tick(), System.currentTimeMillis(), config.fixedGameSpeed(),
                 config.worldWidth(), config.worldHeight(), config.worldSeed(), List.copyOf(cities));
@@ -280,14 +344,14 @@ final class World {
             return;
         }
         WorldStore.save(config.worldFile(), config, epochMillis, nextSlot, new ArrayList<>(players.values()),
-                nextEventId, new ArrayList<>(events), new ArrayList<>(armies),
+                nextEventId, nextCrestRevision, new ArrayList<>(events), new ArrayList<>(armies),
                 new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers));
         dirty = false;
     }
 
     synchronized void save() throws IOException {
         WorldStore.save(config.worldFile(), config, epochMillis, nextSlot, new ArrayList<>(players.values()),
-                nextEventId, new ArrayList<>(events), new ArrayList<>(armies),
+                nextEventId, nextCrestRevision, new ArrayList<>(events), new ArrayList<>(armies),
                 new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers));
         dirty = false;
     }
@@ -346,7 +410,8 @@ final class World {
         }
     }
 
-    private SyncResult sync(String playerId, long afterEventId, List<Messages.CommandResult> results) {
+    private SyncResult sync(String playerId, long afterEventId, long afterCrestRevision,
+            List<Messages.CommandResult> results) {
         resolveArmies(System.currentTimeMillis());
         List<Messages.WorldEvent> visibleEvents = new ArrayList<>();
         long cursor = afterEventId;
@@ -355,7 +420,7 @@ final class World {
                 continue;
             }
             cursor = event.eventId;
-            if (event.visibleTo(playerId)) {
+            if (eventVisibleTo(event, playerId)) {
                 visibleEvents.add(event.message());
                 if (visibleEvents.size() >= syxkingdoms.protocol.Protocol.MAX_EVENTS_PER_SYNC) {
                     break;
@@ -365,10 +430,42 @@ final class World {
         if (visibleEvents.size() < syxkingdoms.protocol.Protocol.MAX_EVENTS_PER_SYNC) {
             cursor = Math.max(cursor, nextEventId - 1);
         }
+        List<PlayerRecord> changedCrests = players.values().stream()
+                .filter(candidate -> candidate.crest != null && candidate.crestRevision > afterCrestRevision)
+                .sorted(Comparator.comparingLong(candidate -> candidate.crestRevision))
+                .toList();
+        List<Messages.Crest> visibleCrests = new ArrayList<>();
+        long crestCursor = afterCrestRevision;
+        for (PlayerRecord candidate : changedCrests) {
+            crestCursor = candidate.crestRevision;
+            visibleCrests.add(new Messages.Crest(candidate.crestRevision, candidate.playerId,
+                    candidate.crest.hash(), candidate.crest.pixelsEncoded(), candidate.crest.paletteHex()));
+            if (visibleCrests.size() >= syxkingdoms.protocol.Protocol.MAX_CRESTS_PER_SYNC) {
+                break;
+            }
+        }
+        if (visibleCrests.size() < syxkingdoms.protocol.Protocol.MAX_CRESTS_PER_SYNC) {
+            crestCursor = Math.max(crestCursor, nextCrestRevision - 1);
+        }
         PlayerRecord player = players.get(playerId);
-        return new SyncResult(snapshot(), new Messages.PlayerState(player.crowns, player.levies),
-                List.copyOf(results), cursor, List.copyOf(visibleEvents), relationsFor(playerId),
+        return new SyncResult(snapshot(), new Messages.PlayerState(
+                player.crowns, player.levies, player.protectionEndsEpochMillis),
+                List.copyOf(results), cursor, List.copyOf(visibleEvents), crestCursor,
+                List.copyOf(visibleCrests), relationsFor(playerId),
                 armies.stream().map(ArmyRecord::message).toList(), deliveriesFor(playerId), marketOffers());
+    }
+
+    private boolean eventVisibleTo(WorldEventRecord event, String playerId) {
+        if (!"LOCAL_CHAT".equals(event.type)) {
+            return event.visibleTo(playerId);
+        }
+        if (event.actorPlayerId.equals(playerId)) {
+            return true;
+        }
+        PlayerRecord listener = players.get(playerId);
+        return listener != null
+                && SharedWorld.sectorX(listener.x) == event.value1
+                && SharedWorld.sectorY(listener.y) == event.value2;
     }
 
     private List<Messages.CommandResult> applyCommands(String playerId, List<Messages.Command> commands) {
@@ -397,7 +494,8 @@ final class World {
 
     private Messages.CommandResult executeCommand(String playerId, Messages.Command command) throws ProtocolException {
         PlayerRecord actor = requireOnlinePlayer(playerId);
-        if (("CHAT".equals(command.type()) || "MAIL".equals(command.type())) && muted(actor.playerId)) {
+        if (("CHAT".equals(command.type()) || "LOCAL_CHAT".equals(command.type())
+                || "MAIL".equals(command.type())) && muted(actor.playerId)) {
             throw new ProtocolException("ACCOUNT_MUTED", "This player identity is muted from chat and mail");
         }
         return switch (command.type()) {
@@ -406,6 +504,30 @@ final class World {
                 String text = socialText(command.text(), "chat message");
                 appendEvent(command, "CHAT", actor, "", text, "", 0, 0);
                 yield accepted(command, "MESSAGE_SENT", "Global message sent");
+            }
+            case "LOCAL_CHAT" -> {
+                requireBlankTarget(command);
+                String text = socialText(command.text(), "local chat message");
+                int sectorX = SharedWorld.sectorX(actor.x);
+                int sectorY = SharedWorld.sectorY(actor.y);
+                appendEvent(command, "LOCAL_CHAT", actor, "", text, "", sectorX, sectorY);
+                yield accepted(command, "LOCAL_MESSAGE_SENT",
+                        "Local message sent to province " + sectorX + "," + sectorY);
+            }
+            case "SET_CREST" -> {
+                requireBlankTarget(command);
+                if (command.value1() != 0 || command.value2() != 0) {
+                    throw new ProtocolException("BAD_CREST", "Crest commands must not contain numeric values");
+                }
+                CrestDesign crest = CrestDesign.decode(command.argument(), command.text());
+                if (!crest.hasVisiblePixels()) {
+                    throw new ProtocolException("BAD_CREST", "A kingdom crest must contain at least one visible pixel");
+                }
+                actor.crest = crest;
+                actor.crestRevision = nextCrestRevision++;
+                appendEvent(command, "CREST_UPDATED", actor, "", crest.hash(), "",
+                        actor.crestRevision, 0);
+                yield accepted(command, "CREST_UPDATED", "Kingdom crest saved and synchronized");
             }
             case "MAIL" -> {
                 PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
@@ -435,6 +557,12 @@ final class World {
             }
             case "SEND_ARMY" -> {
                 PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
+                long now = System.currentTimeMillis();
+                if (target.protectionEndsEpochMillis > now) {
+                    throw new ProtocolException("TARGET_PROTECTED",
+                            target.kingdomName + " is under beginner protection until "
+                                    + target.protectionEndsEpochMillis);
+                }
                 if (!"WAR".equals(effectiveStance(actor.playerId, target.playerId))) {
                     throw new ProtocolException("NOT_AT_WAR", "Armies can only target a city with an effective WAR stance");
                 }
@@ -452,8 +580,13 @@ final class World {
                 if (armies.size() >= syxkingdoms.protocol.Protocol.MAX_ARMIES_PER_SYNC) {
                     throw new ProtocolException("WORLD_ARMY_LIMIT", "The persistent world army capacity is currently full");
                 }
-                long departed = System.currentTimeMillis();
+                long departed = now;
                 long arrives = departed + travelMillis(actor, target);
+                if (actor.protectionEndsEpochMillis > now) {
+                    actor.protectionEndsEpochMillis = 0;
+                    appendSystemEvent("PROTECTION_ENDED", actor, "", actor.kingdomName,
+                            "ARMY_LAUNCHED", 0, 0);
+                }
                 actor.levies -= troops;
                 armies.add(new ArmyRecord(command.commandId(), actor.playerId, target.playerId,
                         troops, departed, arrives));
@@ -710,6 +843,8 @@ final class World {
     private static String resultCode(String eventType) {
         return switch (eventType) {
             case "CHAT" -> "MESSAGE_SENT";
+            case "LOCAL_CHAT" -> "LOCAL_MESSAGE_SENT";
+            case "CREST_UPDATED" -> "CREST_UPDATED";
             case "MAIL" -> "MAIL_SENT";
             case "STANCE" -> "STANCE_RECORDED";
             case "TRANSFER" -> "TRANSFER_RECORDED";
@@ -826,17 +961,49 @@ final class World {
         }
     }
 
-    private static String displayName(String input, String field) throws ProtocolException {
-        String value = input == null ? "" : input.trim().replaceAll("\\s+", " ");
-        if (value.isEmpty() || value.length() > 48) {
-            throw new ProtocolException("BAD_NAME", field + " must contain 1-48 characters");
+    private static String foundingName(String input, String field) throws ProtocolException {
+        String value = Normalizer.normalize(input == null ? "" : input, Normalizer.Form.NFKC)
+                .trim().replaceAll("\\s+", " ");
+        if (value.length() < 3 || value.length() > 32) {
+            throw new ProtocolException("BAD_FOUNDING_NAME", field + " must contain 3-32 characters");
         }
         for (int i = 0; i < value.length(); i++) {
-            if (Character.isISOControl(value.charAt(i))) {
-                throw new ProtocolException("BAD_NAME", field + " contains a control character");
+            char character = value.charAt(i);
+            if (!Character.isLetterOrDigit(character) && character != ' '
+                    && character != '\'' && character != '-') {
+                throw new ProtocolException("BAD_FOUNDING_NAME",
+                        field + " may only use letters, numbers, spaces, apostrophes, and hyphens");
             }
         }
+        if (RESERVED_NAMES.contains(nameKey(value))) {
+            throw new ProtocolException("RESERVED_NAME", field + " is reserved by the server");
+        }
         return value;
+    }
+
+    private static String nameKey(String value) {
+        return Normalizer.normalize(value, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
+    }
+
+    private void ensureFoundingNamesAvailable(PlayerRecord current, String ruler, String kingdom, String capital)
+            throws ProtocolException {
+        String rulerKey = nameKey(ruler);
+        String kingdomKey = nameKey(kingdom);
+        String capitalKey = nameKey(capital);
+        for (PlayerRecord other : players.values()) {
+            if (other == current || !other.foundingComplete()) {
+                continue;
+            }
+            if (rulerKey.equals(nameKey(other.playerName))) {
+                throw new ProtocolException("RULER_NAME_TAKEN", "That ruler name already exists in this world");
+            }
+            if (kingdomKey.equals(nameKey(other.kingdomName))) {
+                throw new ProtocolException("KINGDOM_NAME_TAKEN", "That kingdom name already exists in this world");
+            }
+            if (capitalKey.equals(nameKey(other.cityName))) {
+                throw new ProtocolException("CAPITAL_NAME_TAKEN", "That capital name already exists in this world");
+            }
+        }
     }
 
     private static String hashToken(String playerId, String token) throws ProtocolException {
@@ -851,14 +1018,10 @@ final class World {
         }
     }
 
-    private int[] coordinateForSlot(int slot) throws ProtocolException {
+    private long[] buildCityCoordinates() {
         long columns = (config.worldWidth() - 1L) / config.citySpacing() + 1L;
         long rows = (config.worldHeight() - 1L) / config.citySpacing() + 1L;
         long capacity = columns * rows;
-        if (slot < 0 || slot >= capacity) {
-            throw new ProtocolException("WORLD_FULL", "No shared-world city coordinates remain");
-        }
-
         long hash = Integer.toUnsignedLong(config.worldSeed().hashCode());
         long start = Math.floorMod(hash * 1_103_515_245L + 12_345L, capacity);
         long step = capacity == 1 ? 1 : Math.floorMod(hash * 2_654_435_761L + 1L, capacity - 1L) + 1L;
@@ -868,7 +1031,8 @@ final class World {
                 step = 1L;
             }
         }
-        int buildableSlot = 0;
+        long[] result = new long[(int) terrain.cityCoordinateCapacity(config.citySpacing())];
+        int count = 0;
         for (long candidate = 0; candidate < capacity; candidate++) {
             long index = Math.floorMod(start + candidate * step, capacity);
             int x = (int) (index % columns) * config.citySpacing();
@@ -876,11 +1040,63 @@ final class World {
             if (!terrain.canFoundCity(x, y)) {
                 continue;
             }
-            if (buildableSlot++ == slot) {
-                return new int[] { x, y };
+            result[count++] = coordinateKey(x, y);
+        }
+        if (count != result.length) {
+            throw new IllegalStateException("Shared-world buildable coordinate count changed during initialization");
+        }
+        return result;
+    }
+
+    private int[] coordinateForFounding(String placementReference) throws ProtocolException {
+        Set<Long> occupied = new HashSet<>();
+        for (PlayerRecord existing : players.values()) {
+            occupied.add(coordinateKey(existing.x, existing.y));
+        }
+
+        PlayerRecord reference = null;
+        if (placementReference != null && !placementReference.isBlank()) {
+            String referenceName = foundingName(placementReference, "placement-reference kingdom");
+            String referenceKey = nameKey(referenceName);
+            reference = players.values().stream()
+                    .filter(PlayerRecord::foundingComplete)
+                    .filter(player -> referenceKey.equals(nameKey(player.kingdomName)))
+                    .findFirst()
+                    .orElseThrow(() -> new ProtocolException("PLACEMENT_REFERENCE_NOT_FOUND",
+                            "No existing kingdom named '" + referenceName + "' was found"));
+        }
+
+        long selected = -1;
+        long closestDistance = Long.MAX_VALUE;
+        for (long coordinate : cityCoordinates) {
+            if (occupied.contains(coordinate)) {
+                continue;
+            }
+            if (reference == null) {
+                return decodeCoordinate(coordinate);
+            }
+            int x = (int) (coordinate >>> 32);
+            int y = (int) coordinate;
+            long dx = (long) x - reference.x;
+            long dy = (long) y - reference.y;
+            long distance = dx * dx + dy * dy;
+            if (distance < closestDistance) {
+                selected = coordinate;
+                closestDistance = distance;
             }
         }
+        if (selected >= 0) {
+            return decodeCoordinate(selected);
+        }
         throw new ProtocolException("WORLD_FULL", "No buildable shared-world city coordinates remain");
+    }
+
+    private static long coordinateKey(int x, int y) {
+        return ((long) x << 32) | Integer.toUnsignedLong(y);
+    }
+
+    private static int[] decodeCoordinate(long coordinate) {
+        return new int[] { (int) (coordinate >>> 32), (int) coordinate };
     }
 
     private static long greatestCommonDivisor(long a, long b) {

@@ -31,19 +31,7 @@ $preservedConfig = -not $ResetConfig -and (Test-Path -LiteralPath $targetConfig)
 if (-not $preservedConfig) {
     Copy-Item -LiteralPath (Join-Path $source 'config.txt') -Destination $targetConfig -Force
 } else {
-    $configLines = @(Get-Content -LiteralPath $targetConfig)
-    for ($index = 0; $index -lt $configLines.Count; $index++) {
-        if ($configLines[$index] -match '^\s*WORLD_ID\s*=\s*local-dev\s*$') {
-            $configLines[$index] = 'WORLD_ID = syx-kingdoms-one-world'
-        }
-    }
-    if (-not ($configLines -match '^\s*USE_TLS\s*=')) {
-        $configLines += 'USE_TLS = false'
-    }
-    if (-not ($configLines -match '^\s*TLS_CERTIFICATE_SHA256\s*=')) {
-        $configLines += 'TLS_CERTIFICATE_SHA256 ='
-    }
-    Set-Content -LiteralPath $targetConfig -Value $configLines -Encoding UTF8
+    Write-Host 'Existing client config will remain byte-for-byte unchanged.'
 }
 
 Write-Host "Installed: $target"

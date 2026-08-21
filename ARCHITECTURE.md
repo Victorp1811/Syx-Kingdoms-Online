@@ -25,7 +25,7 @@ globally, rather than merely one verified world file per server installation.
 | Owner | State |
 | --- | --- |
 | Client city shard | citizens, rooms, jobs, local production, local rendering |
-| Dedicated server | identity, city slot, world clock, presence, trade, diplomacy, armies |
+| Dedicated server | identity, founding names, city slot, protection, world clock, presence, trade, diplomacy, armies |
 | Derived/cached on client | remote city summaries and shared-world presentation |
 
 Clients submit bounded commands. The server validates and persists them, then
@@ -33,25 +33,43 @@ returns authoritative results. A client never writes another player's city state
 
 ## Current vertical slice
 
-The V4 wire protocol uses bounded UTF-8, tab-separated frames with base64url text
+The V6 wire protocol uses bounded UTF-8, tab-separated frames with base64url text
 fields. On connection, a client authenticates its stable player ID and token and
 reports its exact game, client, and active-mod versions. The client refuses to
 connect when another mod is active, and the server independently enforces the
-required manifest. The server allocates a persistent city slot, returns the
+required manifest. A new identity first submits a ruler, kingdom, capital, and
+optional nearby-kingdom reference. The server normalizes and uniquely reserves
+the names, selects an unoccupied buildable coordinate, and creates the player in
+one synchronized operation. Returning identities use the stored authoritative
+profile rather than client configuration. Pre-V0.6 players retain their existing
+coordinate and complete the same profile on their next login. The server returns the
 authoritative world dimensions, seed, tick settings, and sends a roster after each
 heartbeat. World persistence uses a temporary file plus atomic replacement where
 the filesystem supports it.
 
-Updates carry a monotonic sequence, event cursor, and up to eight UUID-addressed
+Updates carry a monotonic sequence, event and crest cursors, and up to eight UUID-addressed
 commands. Accepted effects are saved before the response. Replayed IDs return the
 recorded result without duplicating chat, transfers, armies, shipments, offers, or
-purchases. Public and private events are paged through a visibility-aware cursor.
-Persisted world format 7 also records the public order book and partial fills.
+purchases. Public, province-local, and private events are paged through a
+visibility-aware cursor. Local messages record the sender's base-map-sized sector
+and are delivered only to identities whose cities occupy that same sector; all
+chat actor names come from the permanent server profile.
+Persisted world format 9 records founding profiles, protection deadlines, and
+validated 32×32 indexed-color kingdom crests in addition to the public order book
+and partial fills. Each crest has one transparent and fifteen editable RGB palette
+slots, a SHA-256 content hash, and a monotonic revision. Paged crest frames let
+clients cache designs without including every crest in every heartbeat. New kingdoms receive a
+configurable five-day default protection window. Incoming armies are rejected
+until it expires; the first accepted outgoing army clears the attacker's window.
 
-The client script runs on the game's normal update hook. While connected, it
-forces the configured server speed every update, so pause and local speed changes
-cannot stop or accelerate an online city. It publishes population and treasury
-without granting the server arbitrary access to the local save.
+The client script runs on the game's normal update hook. A fresh server heartbeat
+unlocks exactly 1x simulation; joining, disconnection, or a stale session locks it
+to 0x. An input filter consumes pause, speed, quickload, debugger, and vanilla
+world-switch hotkeys before the normal game handler sees them, while update and
+render hooks correct the actual speed. The ruleset also disables vanilla AI
+trade, redirects the vanilla world screen, rejects development mode, and binds a
+save to its persistent player/world identity. It publishes population and local
+treasury summaries without granting the server arbitrary access to the local save.
 
 ## Milestones
 
@@ -60,23 +78,35 @@ without granting the server arbitrary access to the local save.
 2. **10× shared-world contract and panel (implemented):** a persistent 2560-square
    coordinate plane, 100 visible base-map sectors, deterministic city coordinates,
    exact version/mod-set checks, and an in-game remote-city map.
-3. **Vanilla world-map projection:** materialize remote cities as player-owned
+3. **Kingdom founding (implemented MVP):** permanent ruler/kingdom/capital names,
+   optional social placement, atomic claims, legacy-profile migration, and
+   beginner protection.
+4. **Vanilla world-map projection:** materialize remote cities as player-owned
    regions and make shared locations interactive in the normal game UI.
-4. **Strategic economy (implemented MVP):** server crowns/levies, transfers,
+5. **Strategic economy (implemented MVP):** server crowns/levies, transfers,
    recoverable physical-resource escrow, shipments, durable inboxes, and delivery
    acknowledgements, plus persistent public sell offers, partial purchases, crown
    settlement, and cancellation refunds.
-5. **Diplomacy and chat (implemented MVP):** global chat, private mail, mutual
-   alliances, war declarations, visibility filtering, rate limits, and live-loaded
-   ban/mute controls.
-6. **Armies and raids (implemented MVP):** authoritative levy commitment, routes,
+6. **Diplomacy and chat (implemented MVP):** province-local chat, global chat,
+   private mail, permanent ruler-name attribution, mutual alliances, war
+   declarations, visibility filtering, rate limits, and live-loaded ban/mute
+   controls.
+7. **Armies and raids (implemented MVP):** authoritative levy commitment, routes,
    arrival times, defender resolution, raid spoils, and replay protection. Full
    tactical battle instances remain future work.
-7. **Operations (partially implemented):** TLS client, container service, atomic
+8. **Operations (partially implemented):** TLS client, container service, atomic
    persistence, backups, strict compatibility, CI, command auditing, rate limiting,
    moderation tools, and periodic operational counts. A Steam or central account
    provider, external metrics/alerting, and stronger attestation remain before a
    public competitive launch.
+9. **Online ruleset hardening (implemented MVP):** connection-gated simulation,
+   canonical 1x speed, restricted local inputs/world/trade, development-mode
+   rejection, save identity binding, and a retained resource-debit rollback
+   journal. Non-modal UI and trusted client/account attestation remain future work.
+10. **Kingdom identity (implemented MVP):** server-owned 32×32/16-slot crests,
+    native-banner import, an in-game pixel editor, large previews, persistence,
+    validation, hashes, and revision-aware client caches. House crests will reuse
+    this format when guild membership is implemented.
 
 ## Non-goals
 

@@ -68,6 +68,8 @@ $modTestClasspath = $modTestClasses.FullName + [IO.Path]::PathSeparator + $GameJ
 if ($LASTEXITCODE -ne 0) { throw 'ModLoadSmokeTest failed.' }
 & java -cp $modTestClasspath 'syxkingdoms.mod.TradeLedgerTest'
 if ($LASTEXITCODE -ne 0) { throw 'TradeLedgerTest failed.' }
+& java -cp $modTestClasspath 'syxkingdoms.mod.CrestEditorModelTest'
+if ($LASTEXITCODE -ne 0) { throw 'CrestEditorModelTest failed.' }
 
 $wrongVersions = New-Object System.Collections.Generic.List[string]
 Get-ChildItem -LiteralPath (Join-Path $build 'classes') -Recurse -Filter '*.class' | ForEach-Object {

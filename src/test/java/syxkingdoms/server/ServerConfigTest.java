@@ -17,8 +17,22 @@ public final class ServerConfigTest {
         check(config.worldWidth() == SharedWorld.WIDTH && config.worldHeight() == SharedWorld.HEIGHT,
                 "canonical world dimensions");
         check(config.maxPlayers() == 2048, "canonical player capacity");
+        check(config.beginnerProtectionMillis() == 432_000_000L, "canonical five-day beginner protection");
+        check(Double.compare(config.fixedGameSpeed(), SharedWorld.FIXED_GAME_SPEED) == 0,
+                "canonical fixed 1x simulation speed");
         check(new SharedWorldTerrain(config.worldSeed()).cityCoordinateCapacity(config.citySpacing())
                 >= config.maxPlayers(), "canonical buildable capacity");
+        try {
+            ServerConfig.validate(new ServerConfig(config.bindAddress(), config.port(), config.worldId(),
+                    config.worldName(), config.worldFile(), config.worldWidth(), config.worldHeight(),
+                    config.citySpacing(), config.worldSeed(), config.requiredGameVersion(),
+                    config.requiredModVersion(), config.requiredModManifest(), config.tickMillis(), 5.0,
+                    config.maxPlayers(), config.beginnerProtectionMillis(),
+                    config.heartbeatTimeoutMillis(), config.saveIntervalMillis()));
+            throw new AssertionError("noncanonical speed should be rejected");
+        } catch (IllegalArgumentException expected) {
+            check(expected.getMessage().contains("locked"), "fixed-speed rejection message");
+        }
         System.out.println("ServerConfigTest: PASS");
     }
 

@@ -99,7 +99,7 @@ public final class KingdomsServer implements AutoCloseable {
             World.JoinResult joined = world.join(hello);
             playerId = joined.player().playerId;
             LineIO.writeLine(socket.getOutputStream(), joined.welcome().encode());
-            sendSync(socket, world.initialSync(playerId, hello.lastEventId()));
+            sendSync(socket, world.initialSync(playerId, hello.lastEventId(), hello.lastCrestRevision()));
             log("Joined " + joined.player().playerName + " / " + joined.player().cityName + " from " + remote);
 
             long lastSequence = -1;
@@ -158,6 +158,11 @@ public final class KingdomsServer implements AutoCloseable {
                 new Messages.EventsHeader(sync.eventCursor(), sync.events().size()).encode());
         for (Messages.WorldEvent event : sync.events()) {
             LineIO.writeLine(socket.getOutputStream(), event.encode());
+        }
+        LineIO.writeLine(socket.getOutputStream(),
+                new Messages.CrestsHeader(sync.crestCursor(), sync.crests().size()).encode());
+        for (Messages.Crest crest : sync.crests()) {
+            LineIO.writeLine(socket.getOutputStream(), crest.encode());
         }
         LineIO.writeLine(socket.getOutputStream(), new Messages.RelationsHeader(sync.relations().size()).encode());
         for (Messages.Relation relation : sync.relations()) {

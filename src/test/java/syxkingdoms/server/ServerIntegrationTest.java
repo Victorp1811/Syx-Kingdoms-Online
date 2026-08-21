@@ -2,6 +2,7 @@ package syxkingdoms.server;
 
 import syxkingdoms.protocol.LineIO;
 import syxkingdoms.protocol.Messages;
+import syxkingdoms.protocol.CrestDesign;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -118,6 +119,19 @@ public final class ServerIntegrationTest {
                 WorldPersistenceTest.check(marching.armies().stream()
                         .anyMatch(army -> army.armyId().equals("send-army-01") && army.troops() == 10),
                         "traveling army appears in sync");
+
+                CrestDesign crest = CrestDesign.blank().withColor(1, 0x3366CC)
+                        .withColor(2, 0xFFCC33).withPixel(0, 0, 1).withPixel(31, 31, 2);
+                Messages.Command setCrest = new Messages.Command("wire-crest-0001", "SET_CREST", "",
+                        crest.pixelsEncoded(), 0, 0, crest.paletteHex());
+                Sync crestSaved = alice.update(11, 321, 9000, List.of(setCrest));
+                WorldPersistenceTest.check(crestSaved.results().getFirst().accepted()
+                                && crestSaved.crests().stream().anyMatch(item -> item.hash().equals(crest.hash())),
+                        "32x32 crest is accepted and synchronized to its owner over the wire");
+                Sync bobCrest = bob.update(8, 654, 8000, List.of());
+                WorldPersistenceTest.check(bobCrest.crests().stream().anyMatch(item ->
+                                item.playerId().equals("alice-id") && item.hash().equals(crest.hash())),
+                        "16-color crest revision synchronizes to another live client");
             }
         }
         System.out.println("ServerIntegrationTest: PASS");
@@ -129,6 +143,7 @@ public final class ServerIntegrationTest {
 
     private record Sync(Messages.WorldState world, Messages.PlayerState playerState,
             List<Messages.CommandResult> results, long eventCursor, List<Messages.WorldEvent> events,
+            long crestCursor, List<Messages.Crest> crests,
             List<Messages.Relation> relations, List<Messages.Army> armies,
             List<Messages.Delivery> deliveries, List<Messages.MarketOffer> marketOffers) {
     }
@@ -138,12 +153,14 @@ public final class ServerIntegrationTest {
         final Messages.Welcome welcome;
         final Messages.WorldState initial;
         long eventCursor;
+        long crestCursor;
 
         private TestClient(Socket socket, Messages.Welcome welcome, Sync initialSync) {
             this.socket = socket;
             this.welcome = welcome;
             this.initial = initialSync.world();
             this.eventCursor = initialSync.eventCursor();
+            this.crestCursor = initialSync.crestCursor();
         }
 
         static TestClient connect(int port, Messages.Hello hello) throws Exception {
@@ -157,13 +174,14 @@ public final class ServerIntegrationTest {
 
         Sync update(long sequence, int population, long credits, List<Messages.Command> commands) throws Exception {
             Messages.ClientUpdate update = new Messages.ClientUpdate(sequence, population, credits,
-                    eventCursor, commands);
+                    eventCursor, crestCursor, commands);
             LineIO.writeLine(socket.getOutputStream(), update.header());
             for (Messages.Command command : commands) {
                 LineIO.writeLine(socket.getOutputStream(), command.encode());
             }
             Sync sync = readSync(socket);
             eventCursor = sync.eventCursor();
+            crestCursor = sync.crestCursor();
             return sync;
         }
 
@@ -193,6 +211,12 @@ public final class ServerIntegrationTest {
             for (int i = 0; i < eventsHeader.eventCount(); i++) {
                 events.add(Messages.WorldEvent.decode(LineIO.readLine(socket.getInputStream())));
             }
+            Messages.CrestsHeader crestsHeader = Messages.CrestsHeader.decode(
+                    LineIO.readLine(socket.getInputStream()));
+            List<Messages.Crest> crests = new ArrayList<>();
+            for (int i = 0; i < crestsHeader.crestCount(); i++) {
+                crests.add(Messages.Crest.decode(LineIO.readLine(socket.getInputStream())));
+            }
             Messages.RelationsHeader relationsHeader = Messages.RelationsHeader.decode(
                     LineIO.readLine(socket.getInputStream()));
             List<Messages.Relation> relations = new ArrayList<>();
@@ -220,7 +244,8 @@ public final class ServerIntegrationTest {
                 throw new AssertionError("missing SYNC_END");
             }
             return new Sync(world, playerState, List.copyOf(results), eventsHeader.cursor(),
-                    List.copyOf(events), List.copyOf(relations), List.copyOf(armies),
+                    List.copyOf(events), crestsHeader.cursor(), List.copyOf(crests),
+                    List.copyOf(relations), List.copyOf(armies),
                     List.copyOf(deliveries), List.copyOf(marketOffers));
         }
     }

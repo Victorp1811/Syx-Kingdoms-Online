@@ -1,6 +1,8 @@
 package syxkingdoms.server;
 
 import syxkingdoms.protocol.Protocol;
+import syxkingdoms.protocol.CrestDesign;
+import syxkingdoms.protocol.ProtocolException;
 import syxkingdoms.protocol.SharedWorld;
 import syxkingdoms.protocol.SharedWorldTerrain;
 
@@ -19,7 +21,7 @@ import java.util.Properties;
 
 final class WorldStore {
     record LoadedWorld(long epochMillis, int nextSlot, List<PlayerRecord> players,
-            long nextEventId, List<WorldEventRecord> events, List<ArmyRecord> armies,
+            long nextEventId, long nextCrestRevision, List<WorldEventRecord> events, List<ArmyRecord> armies,
             List<ShipmentRecord> shipments, List<DeliveryRecord> deliveries,
             List<MarketOfferRecord> marketOffers) {
     }
@@ -29,7 +31,7 @@ final class WorldStore {
 
     static LoadedWorld load(Path path, ServerConfig config) throws IOException {
         if (!Files.exists(path)) {
-            return new LoadedWorld(System.currentTimeMillis(), 0, List.of(), 1,
+            return new LoadedWorld(System.currentTimeMillis(), 0, List.of(), 1, 1,
                     List.of(), List.of(), List.of(), List.of(), List.of());
         }
         Properties p = new Properties();
@@ -41,7 +43,7 @@ final class WorldStore {
             throw new IOException("World file belongs to '" + storedWorldId + "', not '" + config.worldId() + "'");
         }
         int format = Integer.parseInt(p.getProperty("format", "1"));
-        if (format > 7) {
+        if (format > 9) {
             throw new IOException("World file format " + format + " is newer than this server supports");
         }
         if (format >= 2) {
@@ -65,6 +67,7 @@ final class WorldStore {
         }
         long epoch = Long.parseLong(p.getProperty("world.epochMillis"));
         int nextSlot = Integer.parseInt(p.getProperty("world.nextSlot", "0"));
+        long nextCrestRevision = Long.parseLong(p.getProperty("crests.nextRevision", "1"));
         List<PlayerRecord> players = new ArrayList<>();
         int count = Integer.parseInt(p.getProperty("players.count", "0"));
         for (int i = 0; i < count; i++) {
@@ -76,7 +79,10 @@ final class WorldStore {
                     Integer.parseInt(required(p, prefix + "x")),
                     Integer.parseInt(required(p, prefix + "y")));
             player.playerName = decode(p.getProperty(prefix + "name", ""), "player name");
+            player.kingdomName = decode(p.getProperty(prefix + "kingdom", ""), "kingdom name");
             player.cityName = decode(p.getProperty(prefix + "city", ""), "city name");
+            player.foundedEpochMillis = Long.parseLong(p.getProperty(prefix + "founded", "0"));
+            player.protectionEndsEpochMillis = Long.parseLong(p.getProperty(prefix + "protectionEnds", "0"));
             player.gameVersion = decode(p.getProperty(prefix + "gameVersion", ""), "game version");
             player.modVersion = decode(p.getProperty(prefix + "modVersion", ""), "mod version");
             player.population = Integer.parseInt(p.getProperty(prefix + "population", "0"));
@@ -87,6 +93,20 @@ final class WorldStore {
             player.economyUpdatedEpochMillis = Long.parseLong(
                     p.getProperty(prefix + "economyUpdated", Long.toString(System.currentTimeMillis())));
             player.levyProgressMinutes = Integer.parseInt(p.getProperty(prefix + "levyProgressMinutes", "0"));
+            player.crestRevision = Long.parseLong(p.getProperty(prefix + "crestRevision", "0"));
+            String crestPixels = decode(p.getProperty(prefix + "crestPixels", ""), "crest pixels");
+            String crestPalette = decode(p.getProperty(prefix + "crestPalette", ""), "crest palette");
+            if (player.crestRevision == 0) {
+                if (!crestPixels.isBlank() || !crestPalette.isBlank()) {
+                    throw new IOException("Player crest data has no revision for " + player.playerId);
+                }
+            } else {
+                try {
+                    player.crest = CrestDesign.decode(crestPixels, crestPalette);
+                } catch (ProtocolException e) {
+                    throw new IOException("Invalid player crest for " + player.playerId, e);
+                }
+            }
             players.add(player);
         }
         long nextEventId = Long.parseLong(p.getProperty("events.nextId", "1"));
@@ -176,20 +196,22 @@ final class WorldStore {
                     Long.parseLong(required(p, prefix + "unitPrice")),
                     Long.parseLong(required(p, prefix + "created"))));
         }
-        return new LoadedWorld(epoch, nextSlot, List.copyOf(players), nextEventId,
+        return new LoadedWorld(epoch, nextSlot, List.copyOf(players), nextEventId, nextCrestRevision,
                 List.copyOf(events), List.copyOf(armies), List.copyOf(shipments),
                 List.copyOf(deliveries), List.copyOf(offers));
     }
 
     static void save(Path path, ServerConfig config, long epochMillis, int nextSlot,
-            List<PlayerRecord> input, long nextEventId, List<WorldEventRecord> inputEvents,
+            List<PlayerRecord> input, long nextEventId, long nextCrestRevision,
+            List<WorldEventRecord> inputEvents,
             List<ArmyRecord> inputArmies, List<ShipmentRecord> inputShipments,
             List<DeliveryRecord> inputDeliveries, List<MarketOfferRecord> inputOffers) throws IOException {
         Properties p = new Properties();
-        p.setProperty("format", "7");
+        p.setProperty("format", "9");
         p.setProperty("world.id", config.worldId());
         p.setProperty("world.epochMillis", Long.toString(epochMillis));
         p.setProperty("world.nextSlot", Integer.toString(nextSlot));
+        p.setProperty("crests.nextRevision", Long.toString(nextCrestRevision));
         p.setProperty("world.width", Integer.toString(config.worldWidth()));
         p.setProperty("world.height", Integer.toString(config.worldHeight()));
         p.setProperty("world.citySpacing", Integer.toString(config.citySpacing()));
@@ -208,7 +230,10 @@ final class WorldStore {
             p.setProperty(prefix + "x", Integer.toString(player.x));
             p.setProperty(prefix + "y", Integer.toString(player.y));
             p.setProperty(prefix + "name", Protocol.encodeText(orEmpty(player.playerName)));
+            p.setProperty(prefix + "kingdom", Protocol.encodeText(orEmpty(player.kingdomName)));
             p.setProperty(prefix + "city", Protocol.encodeText(orEmpty(player.cityName)));
+            p.setProperty(prefix + "founded", Long.toString(player.foundedEpochMillis));
+            p.setProperty(prefix + "protectionEnds", Long.toString(player.protectionEndsEpochMillis));
             p.setProperty(prefix + "gameVersion", Protocol.encodeText(orEmpty(player.gameVersion)));
             p.setProperty(prefix + "modVersion", Protocol.encodeText(orEmpty(player.modVersion)));
             p.setProperty(prefix + "population", Integer.toString(player.population));
@@ -218,6 +243,11 @@ final class WorldStore {
             p.setProperty(prefix + "levies", Integer.toString(player.levies));
             p.setProperty(prefix + "economyUpdated", Long.toString(player.economyUpdatedEpochMillis));
             p.setProperty(prefix + "levyProgressMinutes", Integer.toString(player.levyProgressMinutes));
+            p.setProperty(prefix + "crestRevision", Long.toString(player.crestRevision));
+            p.setProperty(prefix + "crestPixels", Protocol.encodeText(
+                    player.crest == null ? "" : player.crest.pixelsEncoded()));
+            p.setProperty(prefix + "crestPalette", Protocol.encodeText(
+                    player.crest == null ? "" : player.crest.paletteHex()));
         }
         List<WorldEventRecord> events = new ArrayList<>(inputEvents);
         events.sort(Comparator.comparingLong(event -> event.eventId));

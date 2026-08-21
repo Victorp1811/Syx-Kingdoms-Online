@@ -10,6 +10,7 @@ public final class SharedWorld {
     public static final int WIDTH = BASE_GAME_TILE_DIMENSION * LINEAR_SCALE;
     public static final int HEIGHT = BASE_GAME_TILE_DIMENSION * LINEAR_SCALE;
     public static final int SECTOR_COUNT = LINEAR_SCALE * LINEAR_SCALE;
+    public static final double FIXED_GAME_SPEED = 1.0;
 
     private SharedWorld() {
     }

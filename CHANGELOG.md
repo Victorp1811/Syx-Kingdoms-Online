@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.9.0 - 2026-08-20
+
+- Upgraded the wire protocol to version 6 and persistent world format to 9.
+- Added a server-owned 32×32 kingdom crest format with sixteen indexed palette
+  slots: one transparent and fifteen independently editable 24-bit RGB colors.
+- Added a non-modal in-game crest editor with left-drag painting, right-drag
+  erasing, palette selection, RGB/hex color input, undo, redo, clear, horizontal
+  and vertical mirrors, and automatic native Songs of Syx banner import.
+- Added 64-pixel kingdom-map previews and a 128-pixel live editor preview.
+- Added SHA-256 design hashes and paged revision cursors so validated crests are
+  persisted and synchronized once rather than retransmitted every heartbeat.
+- Added protocol, persistence, two-client wire, malformed-data, and editor-history
+  tests for the new crest system.
+
+## 0.8.0 - 2026-08-20
+
+- Added persistent province-local chat alongside global chat and private mail.
+- Defined a local channel as the sender's base-map-sized `256 × 256` world
+  province; the server filters recipients and records the originating province.
+- Stamped local and global messages with the permanent server-owned ruler name,
+  preventing clients and reconnect attempts from supplying a chat nickname.
+- Added separate Local and Global chat controls and labels to the shared-world
+  overlay, with mute, rate-limit, replay, and persistence behavior shared by both.
+- Added persistence tests proving same-province delivery, cross-province privacy,
+  global delivery, and chosen-name attribution.
+
+## 0.7.0 - 2026-08-20
+
+- Locked the canonical server and client simulation speed to exactly 1x.
+- Added fail-closed simulation gating: cities freeze while connecting,
+  disconnected, founding, or behind on server heartbeat synchronization.
+- Added an input filter for pause, speed, quickload, debugger, and vanilla-world
+  switch hotkeys, with update/render speed correction as a second layer.
+- Rejected Songs of Syx development mode and world-editor sessions.
+- Disabled vanilla AI imports/exports and redirected the vanilla strategic map to
+  the persistent multiplayer map.
+- Bound new game saves to their persistent player identity and canonical world;
+  V0.6 saves migrate on their next save.
+- Extended the crash-safe escrow file into a revisioned rollback journal; loading
+  an older save re-applies later pending/accepted multiplayer resource debits.
+- Changed rejection refunds and inbound deliveries to journal-before-mutation
+  ordering so a ledger write failure cannot duplicate local resources.
+- Added a documented feature matrix and explicit engine/anti-cheat limitations.
+
+## 0.6.0 - 2026-08-20
+
+- Upgraded the wire protocol to version 5 and persisted world to format 8.
+- Added native first-join prompts for a permanent ruler, unique kingdom, capital,
+  and optional placement near an existing kingdom.
+- Made founding atomic: invalid, reserved, or duplicate names consume neither a
+  player record nor a world coordinate.
+- Added deterministic balanced/social placement and migration that preserves the
+  coordinates of pre-founding player records.
+- Added five-day beginner protection, protected-target army rejection, an outgoing
+  army warning, and automatic loss of protection after the first accepted march.
+- Added protection/founding state to server snapshots, client UI, persistence,
+  protocol, and integration tests.
+
 ## 0.5.0 - 2026-08-20
 
 - Upgraded the wire protocol to version 4 and the persisted world to format 7.

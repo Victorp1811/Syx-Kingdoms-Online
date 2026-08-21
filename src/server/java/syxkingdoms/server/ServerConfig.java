@@ -26,6 +26,7 @@ public record ServerConfig(
         long tickMillis,
         double fixedGameSpeed,
         int maxPlayers,
+        long beginnerProtectionMillis,
         long heartbeatTimeoutMillis,
         long saveIntervalMillis) {
 
@@ -52,11 +53,12 @@ public record ServerConfig(
                 integer(properties, "CITY_SPACING", 8),
                 value(properties, "WORLD_SEED", SharedWorld.WORLD_SEED),
                 value(properties, "REQUIRED_GAME_VERSION", "0.71.44"),
-                value(properties, "REQUIRED_MOD_VERSION", "0.5.0"),
-                value(properties, "REQUIRED_MOD_MANIFEST", "Syx Kingdoms Online@0.5.0"),
+                value(properties, "REQUIRED_MOD_VERSION", "0.9.0"),
+                value(properties, "REQUIRED_MOD_MANIFEST", "Syx Kingdoms Online@0.9.0"),
                 longValue(properties, "TICK_MILLIS", 1000L),
-                doubleValue(properties, "FIXED_GAME_SPEED", 1.0),
+                doubleValue(properties, "FIXED_GAME_SPEED", SharedWorld.FIXED_GAME_SPEED),
                 integer(properties, "MAX_PLAYERS", 2048),
+                longValue(properties, "BEGINNER_PROTECTION_MILLIS", 432_000_000L),
                 longValue(properties, "HEARTBEAT_TIMEOUT_MILLIS", 15_000L),
                 longValue(properties, "SAVE_INTERVAL_MILLIS", 5_000L)));
     }
@@ -96,8 +98,9 @@ public record ServerConfig(
         if (config.tickMillis < 50 || config.tickMillis > 86_400_000) {
             throw new IllegalArgumentException("TICK_MILLIS is outside the supported range");
         }
-        if (!Double.isFinite(config.fixedGameSpeed) || config.fixedGameSpeed < 0.01 || config.fixedGameSpeed > 250) {
-            throw new IllegalArgumentException("FIXED_GAME_SPEED is outside the supported range");
+        if (Double.compare(config.fixedGameSpeed, SharedWorld.FIXED_GAME_SPEED) != 0) {
+            throw new IllegalArgumentException("FIXED_GAME_SPEED is locked to "
+                    + SharedWorld.FIXED_GAME_SPEED + " for the canonical online ruleset");
         }
         if (config.maxPlayers < 1 || config.maxPlayers > 2048) {
             throw new IllegalArgumentException("MAX_PLAYERS must be between 1 and 2048");
@@ -111,6 +114,9 @@ public record ServerConfig(
                 .cityCoordinateCapacity(config.citySpacing);
         if (config.maxPlayers > buildableCapacity) {
             throw new IllegalArgumentException("MAX_PLAYERS exceeds the available plains/forest city coordinates");
+        }
+        if (config.beginnerProtectionMillis < 0 || config.beginnerProtectionMillis > 2_592_000_000L) {
+            throw new IllegalArgumentException("BEGINNER_PROTECTION_MILLIS must be between 0 and 30 days");
         }
         if (config.heartbeatTimeoutMillis < 2_000 || config.heartbeatTimeoutMillis > 600_000) {
             throw new IllegalArgumentException("HEARTBEAT_TIMEOUT_MILLIS is outside the supported range");

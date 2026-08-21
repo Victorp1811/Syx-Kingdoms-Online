@@ -18,10 +18,7 @@ record ClientConfig(
         String serverHost,
         int serverPort,
         String worldId,
-        String playerName,
-        String cityName,
         boolean resetIdentity,
-        double fallbackFixedSpeed,
         long heartbeatMillis,
         int connectTimeoutMillis,
         boolean useTls,
@@ -62,10 +59,7 @@ record ClientConfig(
                 value(values, "SERVER_HOST", "127.0.0.1"),
                 integer(values, "SERVER_PORT", 49720),
                 worldId(values),
-                value(values, "PLAYER_NAME", "New Ruler"),
-                value(values, "CITY_NAME", "New City"),
                 bool(values, "RESET_IDENTITY", false),
-                decimal(values, "FALLBACK_FIXED_SPEED", 1.0),
                 longValue(values, "HEARTBEAT_MILLIS", 2000),
                 integer(values, "CONNECT_TIMEOUT_MILLIS", 5000),
                 bool(values, "USE_TLS", false),
@@ -91,14 +85,6 @@ record ClientConfig(
         if (!SharedWorld.WORLD_ID.equals(config.worldId)) {
             throw new IllegalArgumentException("WORLD_ID must be " + SharedWorld.WORLD_ID
                     + "; Syx Kingdoms Online has one persistent world");
-        }
-        if (config.playerName.isBlank() || config.playerName.length() > 48
-                || config.cityName.isBlank() || config.cityName.length() > 48) {
-            throw new IllegalArgumentException("PLAYER_NAME and CITY_NAME must contain 1-48 characters");
-        }
-        if (!Double.isFinite(config.fallbackFixedSpeed) || config.fallbackFixedSpeed < 0.01
-                || config.fallbackFixedSpeed > 250) {
-            throw new IllegalArgumentException("FALLBACK_FIXED_SPEED is outside the supported range");
         }
         if (config.heartbeatMillis < 500 || config.heartbeatMillis > 60_000) {
             throw new IllegalArgumentException("HEARTBEAT_MILLIS is outside the supported range");
@@ -155,7 +141,4 @@ record ClientConfig(
         return Long.parseLong(value(values, key, Long.toString(fallback)));
     }
 
-    private static double decimal(Map<String, String> values, String key, double fallback) {
-        return Double.parseDouble(value(values, key, Double.toString(fallback)));
-    }
 }

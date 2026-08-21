@@ -45,8 +45,9 @@ must be updated deliberately whenever the certificate changes.
 
 The authoritative file is `server-data/syx-kingdoms-world-v1.properties`. It
 contains player authentication hashes, city ownership, event history, diplomacy,
-server crowns/levies, traveling armies, shipments, and pending deliveries. The
-server also stores the public market order book and partial fills. It writes the
+server crowns/levies, founding profiles, real-time protection deadlines, traveling
+armies, shipments, and pending deliveries. The server also stores the public
+market order book and partial fills. It writes the
 world by temporary file plus atomic replacement and verifies the fixed world
 geometry and terrain fingerprint during startup. Live bans and mutes are stored in
 the sibling `moderation.properties` file.
@@ -66,6 +67,10 @@ join logs before reopening traffic.
 ## Operational minimums
 
 - Run exactly one writable authoritative instance.
+- Keep `FIXED_GAME_SPEED=1.0`; V0.9 rejects every other value on server startup
+  and every non-1x welcome on the client.
+- Keep `BEGINNER_PROTECTION_MILLIS=432000000` for the canonical five-day ruleset;
+  changing it affects only kingdoms founded afterward.
 - Keep raw TCP loopback-only and expose only TLS.
 - Back up before every release or persistence migration.
 - Retain server logs and monitor rejected authentication, protocol, and rate-limit events.

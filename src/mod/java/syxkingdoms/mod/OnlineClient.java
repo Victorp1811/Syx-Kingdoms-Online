@@ -4,6 +4,7 @@ import syxkingdoms.protocol.LineIO;
 import syxkingdoms.protocol.Messages;
 import syxkingdoms.protocol.Protocol;
 import syxkingdoms.protocol.ProtocolException;
+import syxkingdoms.protocol.CrestDesign;
 import syxkingdoms.protocol.SharedWorld;
 
 import java.io.IOException;
@@ -25,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -34,7 +36,14 @@ final class OnlineClient implements AutoCloseable {
         void log(String message, Throwable error);
     }
 
-    private static final String MOD_VERSION = "0.5.0";
+    record FoundingProfile(String rulerName, String kingdomName, String capitalName, String placementReference) {
+    }
+
+    private static final String MOD_VERSION = "0.9.0";
+    private static final Set<String> FOUNDING_ERROR_CODES = Set.of(
+            "FOUNDING_REQUIRED", "BAD_FOUNDING_NAME", "RESERVED_NAME",
+            "RULER_NAME_TAKEN", "KINGDOM_NAME_TAKEN", "CAPITAL_NAME_TAKEN",
+            "PLACEMENT_REFERENCE_NOT_FOUND");
     private final ClientConfig config;
     private final Identity identity;
     private final String gameVersion;
@@ -55,10 +64,17 @@ final class OnlineClient implements AutoCloseable {
     private volatile List<Messages.WorldEvent> recentEvents = List.of();
     private volatile List<Messages.Relation> relations = List.of();
     private volatile List<Messages.Army> armies = List.of();
-    private volatile Messages.PlayerState playerState = new Messages.PlayerState(0, 0);
+    private volatile Messages.PlayerState playerState = new Messages.PlayerState(0, 0, 0);
     private volatile List<Messages.Delivery> deliveries = List.of();
     private volatile List<Messages.MarketOffer> marketOffers = List.of();
+    private final Map<String, CrestDesign> crests = new ConcurrentHashMap<>();
+    private final Map<String, Long> crestRevisions = new ConcurrentHashMap<>();
     private volatile long eventCursor;
+    private volatile long crestCursor;
+    private volatile long lastServerSyncNanos;
+    private volatile boolean foundingRequired;
+    private volatile String foundingMessage = "";
+    private volatile FoundingProfile foundingProfile;
     private volatile Socket activeSocket;
     private Thread thread;
 
@@ -91,17 +107,40 @@ final class OnlineClient implements AutoCloseable {
         return connected.get();
     }
 
+    boolean simulationReady() {
+        long lastSync = lastServerSyncNanos;
+        if (!connected.get() || lastSync == 0) {
+            return false;
+        }
+        long freshnessMillis = Math.max(3_000L, config.heartbeatMillis() * 3L);
+        return System.nanoTime() - lastSync <= freshnessMillis * 1_000_000L;
+    }
+
     double fixedSpeed() {
         Messages.WorldState state = worldState;
         if (connected.get() && state.serverTimeEpochMillis() > 0) {
             return state.fixedSpeed();
         }
         Messages.Welcome currentWelcome = welcome;
-        return currentWelcome == null ? config.fallbackFixedSpeed() : currentWelcome.fixedSpeed();
+        return currentWelcome == null ? SharedWorld.FIXED_GAME_SPEED : currentWelcome.fixedSpeed();
     }
 
     String status() {
         return status;
+    }
+
+    boolean foundingRequired() {
+        return foundingRequired && foundingProfile == null;
+    }
+
+    String foundingMessage() {
+        return foundingMessage;
+    }
+
+    void submitFounding(String rulerName, String kingdomName, String capitalName, String placementReference) {
+        foundingProfile = new FoundingProfile(rulerName, kingdomName, capitalName,
+                placementReference == null ? "" : placementReference);
+        status = "submitting kingdom founding claim";
     }
 
     Messages.WorldState worldState() {
@@ -140,6 +179,10 @@ final class OnlineClient implements AutoCloseable {
         return marketOffers;
     }
 
+    CrestDesign crest(String playerId) {
+        return crests.get(playerId);
+    }
+
     List<Messages.CommandResult> drainCommandResults() {
         List<Messages.CommandResult> drained = new ArrayList<>();
         Messages.CommandResult result;
@@ -151,6 +194,17 @@ final class OnlineClient implements AutoCloseable {
 
     String sendGlobalChat(String text) {
         return queueCommand("CHAT", "", "", 0, 0, text);
+    }
+
+    String sendLocalChat(String text) {
+        return queueCommand("LOCAL_CHAT", "", "", 0, 0, text);
+    }
+
+    String setCrest(CrestDesign crest) {
+        if (crest == null) {
+            throw new IllegalArgumentException("Crest is required");
+        }
+        return queueCommand("SET_CREST", "", crest.pixelsEncoded(), 0, 0, crest.paletteHex());
     }
 
     String sendMail(String targetPlayerId, String text) {
@@ -196,6 +250,10 @@ final class OnlineClient implements AutoCloseable {
     private void run() {
         long reconnectDelay = 1_000;
         while (running.get()) {
+            if (foundingRequired && foundingProfile == null) {
+                sleep(250);
+                continue;
+            }
             try {
                 session();
                 reconnectDelay = 1_000;
@@ -207,6 +265,7 @@ final class OnlineClient implements AutoCloseable {
                 }
             } finally {
                 connected.set(false);
+                lastServerSyncNanos = 0;
                 activeSocket = null;
             }
             if (!running.get()) {
@@ -231,13 +290,24 @@ final class OnlineClient implements AutoCloseable {
             }
             socket.setSoTimeout((int) Math.min(60_000, config.heartbeatMillis() + config.connectTimeoutMillis()));
 
+            FoundingProfile profile = foundingProfile;
             Messages.Hello hello = new Messages.Hello(Protocol.VERSION, gameVersion, MOD_VERSION,
-                    modManifest, eventCursor, config.worldId(), identity.playerId(), identity.authToken(),
-                    config.playerName(), config.cityName());
+                    modManifest, eventCursor, crestCursor, config.worldId(), identity.playerId(), identity.authToken(),
+                    profile == null ? "" : profile.rulerName(),
+                    profile == null ? "" : profile.kingdomName(),
+                    profile == null ? "" : profile.capitalName(),
+                    profile == null ? "" : profile.placementReference());
             LineIO.writeLine(socket.getOutputStream(), hello.encode());
             String first = LineIO.readLine(socket.getInputStream());
             if (first.startsWith("ERROR\t")) {
                 Messages.Error error = Messages.Error.decode(first);
+                if (FOUNDING_ERROR_CODES.contains(error.code())) {
+                    foundingRequired = true;
+                    foundingProfile = null;
+                    foundingMessage = error.message();
+                    status = error.code() + ": " + error.message();
+                    return;
+                }
                 throw new ProtocolException(error.code(), error.message());
             }
             welcome = Messages.Welcome.decode(first);
@@ -255,7 +325,14 @@ final class OnlineClient implements AutoCloseable {
                 throw new ProtocolException("WORLD_MAP_MISMATCH",
                         "Server is not hosting the canonical persistent Syx Kingdoms map");
             }
+            if (Double.compare(welcome.fixedSpeed(), SharedWorld.FIXED_GAME_SPEED) != 0) {
+                throw new ProtocolException("WORLD_SPEED_MISMATCH",
+                        "The canonical multiplayer ruleset requires fixed 1x simulation speed");
+            }
             readAndApplySync(socket);
+            foundingRequired = false;
+            foundingMessage = "";
+            foundingProfile = null;
             connected.set(true);
             status = "online in " + welcome.worldName();
             logger.log("Connected to " + welcome.worldName() + " at city slot "
@@ -268,7 +345,7 @@ final class OnlineClient implements AutoCloseable {
                 List<Messages.Command> commands = pendingSnapshot();
                 Messages.ClientUpdate update = new Messages.ClientUpdate(
                         heartbeatSequence.incrementAndGet(), population.get(), credits.get(),
-                        eventCursor, commands);
+                        eventCursor, crestCursor, commands);
                 LineIO.writeLine(socket.getOutputStream(), update.header());
                 for (Messages.Command command : commands) {
                     LineIO.writeLine(socket.getOutputStream(), command.encode());
@@ -324,6 +401,9 @@ final class OnlineClient implements AutoCloseable {
             if (city.x() < 0 || city.x() >= state.worldWidth() || city.y() < 0 || city.y() >= state.worldHeight()) {
                 throw new ProtocolException("BAD_STATE", "Server sent a city outside the shared-world bounds");
             }
+            if (city.kingdomName().isBlank() || city.protectionEndsEpochMillis() < 0) {
+                throw new ProtocolException("BAD_STATE", "Server sent an incomplete kingdom profile");
+            }
             if (!playerIds.add(city.playerId()) || !coordinates.add(city.x() + "," + city.y())) {
                 throw new ProtocolException("BAD_STATE", "Server sent duplicate player or city coordinates");
             }
@@ -350,6 +430,19 @@ final class OnlineClient implements AutoCloseable {
             }
             previousEventId = event.eventId();
             newEvents.add(event);
+        }
+        Messages.CrestsHeader crestsHeader = Messages.CrestsHeader.decode(LineIO.readLine(socket.getInputStream()));
+        List<Messages.Crest> newCrests = new ArrayList<>(crestsHeader.crestCount());
+        long previousCrestRevision = 0;
+        Set<String> crestPlayerIds = new HashSet<>();
+        for (int i = 0; i < crestsHeader.crestCount(); i++) {
+            Messages.Crest crest = Messages.Crest.decode(LineIO.readLine(socket.getInputStream()));
+            if (crest.revision() <= previousCrestRevision || crest.revision() > crestsHeader.cursor()
+                    || !playerIds.contains(crest.playerId()) || !crestPlayerIds.add(crest.playerId())) {
+                throw new ProtocolException("BAD_CRESTS", "Server sent invalid or unordered crest revisions");
+            }
+            previousCrestRevision = crest.revision();
+            newCrests.add(crest);
         }
         Messages.RelationsHeader relationsHeader = Messages.RelationsHeader.decode(
                 LineIO.readLine(socket.getInputStream()));
@@ -404,6 +497,17 @@ final class OnlineClient implements AutoCloseable {
         }
         applyCommandResults(results);
         mergeEvents(newEvents);
+        if (crestsHeader.cursor() < crestCursor) {
+            crests.clear();
+            crestRevisions.clear();
+        }
+        for (Messages.Crest crest : newCrests) {
+            long knownRevision = crestRevisions.getOrDefault(crest.playerId(), 0L);
+            if (crest.revision() >= knownRevision) {
+                crests.put(crest.playerId(), crest.design());
+                crestRevisions.put(crest.playerId(), crest.revision());
+            }
+        }
         worldState = state;
         playerState = newPlayerState;
         relations = List.copyOf(newRelations);
@@ -411,6 +515,8 @@ final class OnlineClient implements AutoCloseable {
         deliveries = List.copyOf(newDeliveries);
         marketOffers = List.copyOf(newMarketOffers);
         eventCursor = eventsHeader.cursor();
+        crestCursor = crestsHeader.cursor();
+        lastServerSyncNanos = System.nanoTime();
     }
 
     private String queueCommand(String type, String targetPlayerId, String argument,
