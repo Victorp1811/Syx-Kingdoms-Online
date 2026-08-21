@@ -39,7 +39,7 @@ final class OnlineClient implements AutoCloseable {
     record FoundingProfile(String rulerName, String kingdomName, String capitalName, String placementReference) {
     }
 
-    private static final String MOD_VERSION = "0.12.0";
+    private static final String MOD_VERSION = "0.13.0";
     private static final Set<String> FOUNDING_ERROR_CODES = Set.of(
             "FOUNDING_REQUIRED", "BAD_FOUNDING_NAME", "RESERVED_NAME",
             "RULER_NAME_TAKEN", "KINGDOM_NAME_TAKEN", "CAPITAL_NAME_TAKEN",

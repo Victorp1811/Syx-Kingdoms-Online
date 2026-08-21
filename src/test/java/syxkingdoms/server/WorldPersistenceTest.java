@@ -172,8 +172,8 @@ public final class WorldPersistenceTest {
         } catch (ProtocolException expected) {
             check("MOD_VERSION_MISMATCH".equals(expected.code()), "mod-version error code");
         }
-        Messages.Hello extraMod = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0|Example Mod@1.0.0", 0, 0, SharedWorld.WORLD_ID, "modded-client",
+        Messages.Hello extraMod = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0|Example Mod@1.0.0", 0, 0, SharedWorld.WORLD_ID, "modded-client",
                 "dddddddddddddddddddddddddddddddd", "Modded Ruler", "Modded Realm", "Modded City", "");
         try {
             reloaded.join(extraMod);
@@ -360,8 +360,8 @@ public final class WorldPersistenceTest {
     private static void verifyFoundingAndProtection(Path worldFile) throws Exception {
         ServerConfig protectedConfig = config(worldFile, 432_000_000L);
         World world = new World(protectedConfig);
-        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "blank-player",
+        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "blank-player",
                 "11111111111111111111111111111111", "", "", "", "");
         try {
             world.join(blank);
@@ -375,8 +375,8 @@ public final class WorldPersistenceTest {
                 "First Ruler", "First Capital"));
         check(first.player().protectionEndsEpochMillis > System.currentTimeMillis(),
                 "new kingdom receives beginner protection");
-        Messages.Hello duplicateKingdom = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "duplicate-player",
+        Messages.Hello duplicateKingdom = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "duplicate-player",
                 "22222222222222222222222222222222", "Second Ruler", first.player().kingdomName,
                 "Second Capital", "");
         try {
@@ -386,8 +386,8 @@ public final class WorldPersistenceTest {
             check("KINGDOM_NAME_TAKEN".equals(expected.code()), "duplicate-kingdom error code");
             check(world.metrics().registeredPlayers() == 1, "duplicate name consumes no player slot");
         }
-        Messages.Hello unknownPlacement = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "unknown-neighbor",
+        Messages.Hello unknownPlacement = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "unknown-neighbor",
                 "44444444444444444444444444444444", "Neighbor Ruler", "Neighbor Realm",
                 "Neighbor Capital", "Missing Realm");
         try {
@@ -400,8 +400,8 @@ public final class WorldPersistenceTest {
 
         World.JoinResult second = world.join(hello("second-player", "22222222222222222222222222222222",
                 "Second Ruler", "Second Capital"));
-        Messages.Hello nearbyHello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "nearby-player",
+        Messages.Hello nearbyHello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "nearby-player",
                 "44444444444444444444444444444444", "Nearby Ruler", "Nearby Realm",
                 "Nearby Capital", first.player().kingdomName);
         World.JoinResult nearby = world.join(nearbyHello);
@@ -455,8 +455,8 @@ public final class WorldPersistenceTest {
         }
 
         World migrated = new World(config(worldFile));
-        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "legacy-player", token,
+        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "legacy-player", token,
                 "", "", "", "");
         try {
             migrated.join(blank);
@@ -479,14 +479,14 @@ public final class WorldPersistenceTest {
     static ServerConfig config(Path worldFile, long beginnerProtectionMillis) {
         return ServerConfig.validate(new ServerConfig("127.0.0.1", 0, SharedWorld.WORLD_ID, SharedWorld.WORLD_NAME,
                 worldFile, SharedWorld.WIDTH, SharedWorld.HEIGHT, 8, SharedWorld.WORLD_SEED,
-                "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0",
+                "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0",
                 1000, 1.0, 2048, beginnerProtectionMillis, 5000, 1000));
     }
 
     static Messages.Hello hello(String id, String token, String name, String city) {
-        return new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
-                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, id, token,
+        return new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
+                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, id, token,
                 name, "Realm " + id, city, "");
     }
 

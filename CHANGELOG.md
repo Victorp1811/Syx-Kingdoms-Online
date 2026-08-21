@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.0 - 2026-08-20
+
+- Replaced every native modal multiplayer text prompt with a live overlay input
+  listener, covering founding, all chat channels, mail, House actions, market and
+  province orders, army/transfer quantities, shipments, and crest palette colors.
+- Captured keyboard events while an overlay prompt is active, including a short
+  submit/cancel grace window, so typing and Enter/Escape cannot trigger settlement
+  hotkeys while the city continues at the canonical 1x speed.
+- Added visible Submit/Cancel controls and explicit Enter/Escape instructions;
+  first-join prompts can now be completed by mouse while simulation remains frozen
+  awaiting the server's founding acceptance.
+- Added a 48-client shared-world soak test with eight Houses, four wars and battles,
+  command replay, mass disconnect/reconnect, six persistence reloads, and 5,760
+  synchronization updates. Server CI and release builds run it automatically.
+
 ## 0.12.0 - 2026-08-20
 
 - Upgraded the wire protocol to version 9 and persistent world format to 12.

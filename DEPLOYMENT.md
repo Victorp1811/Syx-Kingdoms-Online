@@ -69,7 +69,7 @@ join logs before reopening traffic.
 ## Operational minimums
 
 - Run exactly one writable authoritative instance.
-- Keep `FIXED_GAME_SPEED=1.0`; V0.12 rejects every other value on server startup
+- Keep `FIXED_GAME_SPEED=1.0`; V0.13 rejects every other value on server startup
   and every non-1x welcome on the client.
 - Keep `BEGINNER_PROTECTION_MILLIS=432000000` for the canonical five-day ruleset;
   changing it affects only kingdoms founded afterward.

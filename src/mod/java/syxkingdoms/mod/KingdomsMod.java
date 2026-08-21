@@ -19,7 +19,6 @@ import syxkingdoms.protocol.Messages;
 import syxkingdoms.protocol.CrestDesign;
 import syxkingdoms.protocol.SharedWorld;
 import syxkingdoms.protocol.SharedWorldTerrain;
-import view.main.VIEW;
 
 import java.io.IOException;
 import java.util.List;
@@ -72,10 +71,21 @@ public final class KingdomsMod implements SCRIPT {
         private static final int CREST_PALETTE_Y1 = 132;
         private static final int CREST_PALETTE_CELL = 28;
         private static final int CREST_PALETTE_GAP = 2;
+        private static final int INPUT_X1 = 70;
+        private static final int INPUT_X2 = 690;
+        private static final int INPUT_Y1 = 190;
+        private static final int INPUT_Y2 = 310;
+        private static final int INPUT_SUBMIT_X1 = 450;
+        private static final int INPUT_SUBMIT_X2 = 550;
+        private static final int INPUT_CANCEL_X1 = 558;
+        private static final int INPUT_CANCEL_X2 = 658;
+        private static final int INPUT_BUTTON_Y1 = 274;
+        private static final int INPUT_BUTTON_Y2 = 300;
         private final OnlineClient client;
         private final String startupError;
         private final TradeLedger tradeLedger;
-        private final OnlineRules onlineRules = new OnlineRules();
+        private final OverlayTextInput textInput = new OverlayTextInput();
+        private final OnlineRules onlineRules = new OnlineRules(textInput);
         private volatile String fatalOnlineError;
         private long loadedLedgerRevision;
         private boolean rollbackReconciliationPending;
@@ -319,16 +329,18 @@ public final class KingdomsMod implements SCRIPT {
                 renderStartupError(renderer, activeError);
                 return;
             }
-            if (client == null || !client.config().showOverlay()) {
+            if (client == null || (!client.config().showOverlay() && !textInput.active())) {
                 return;
             }
             if (crestEditorOpen && crestEditor != null) {
                 renderCrestEditor(renderer);
+                renderTextPrompt(renderer);
                 return;
             }
             renderTabBar(renderer);
             if (activeTab != OnlineTab.WORLD) {
                 renderActiveTab(renderer);
+                renderTextPrompt(renderer);
                 return;
             }
             Messages.WorldState state = client.worldState();
@@ -388,6 +400,30 @@ public final class KingdomsMod implements SCRIPT {
             }
             renderSocial(renderer, state, x1 + 6, y1 + rosterHeight + mapBlockHeight,
                     width - 12, rowHeight, socialRows);
+            renderTextPrompt(renderer);
+        }
+
+        private void renderTextPrompt(Renderer renderer) {
+            if (!textInput.active()) {
+                return;
+            }
+            COLOR.BLACK.render(renderer, INPUT_X1, INPUT_X2, INPUT_Y1, INPUT_Y2);
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer, truncate(textInput.title(), 84), INPUT_X1 + 12, INPUT_Y1 + 12);
+            String entered = textInput.value();
+            int visibleCharacters = 78;
+            if (entered.length() > visibleCharacters) {
+                entered = "..." + entered.substring(entered.length() - visibleCharacters + 3);
+            }
+            UI.FONT().S.render(renderer, "> " + entered + "_", INPUT_X1 + 12, INPUT_Y1 + 48);
+            UI.FONT().S.render(renderer,
+                    "The city keeps running while you type. Enter submits; Escape cancels.",
+                    INPUT_X1 + 12, INPUT_Y1 + 76);
+            COLOR.unbind();
+            renderButton(renderer, INPUT_SUBMIT_X1, INPUT_SUBMIT_X2,
+                    INPUT_BUTTON_Y1, INPUT_BUTTON_Y2, "Submit", true);
+            renderButton(renderer, INPUT_CANCEL_X1, INPUT_CANCEL_X2,
+                    INPUT_BUTTON_Y1, INPUT_BUTTON_Y2, "Cancel", true);
         }
 
         private void renderTabBar(Renderer renderer) {
@@ -1155,7 +1191,20 @@ public final class KingdomsMod implements SCRIPT {
 
         @Override
         public void mouseClick(MButt button) {
-            if (client == null || !client.simulationReady() || fatalOnlineError != null) {
+            if (client == null || fatalOnlineError != null) {
+                return;
+            }
+            if (textInput.active()) {
+                if (button == MButt.LEFT && inside(INPUT_SUBMIT_X1, INPUT_SUBMIT_X2,
+                        INPUT_BUTTON_Y1, INPUT_BUTTON_Y2)) {
+                    textInput.submit();
+                } else if (button == MButt.LEFT && inside(INPUT_CANCEL_X1, INPUT_CANCEL_X2,
+                        INPUT_BUTTON_Y1, INPUT_BUTTON_Y2)) {
+                    textInput.cancel();
+                }
+                return;
+            }
+            if (!client.simulationReady()) {
                 return;
             }
             if (crestEditorOpen && crestEditor != null) {
@@ -1480,20 +1529,18 @@ public final class KingdomsMod implements SCRIPT {
         private void requestCrestColor() {
             int selected = crestEditor.selectedPalette();
             int current = crestEditor.design().color(selected);
-            VIEW.inters().input.requestInput(value -> {
-                if (value == null) {
-                    return;
-                }
+            textInput.open(String.format(java.util.Locale.ROOT,
+                            "Palette slot %d color (current #%06X)", selected, current),
+                    String.format(java.util.Locale.ROOT, "#%06X", current), value -> {
                 try {
-                    int rgb = parseRgb(value.toString());
+                    int rgb = parseRgb(value);
                     crestEditor.setSelectedColor(rgb);
                     GAME.Notify(String.format(java.util.Locale.ROOT,
                             "Palette slot %d changed to #%06X", selected, rgb));
                 } catch (IllegalArgumentException e) {
                     GAME.WarnLight("Use #RRGGBB or three RGB values from 0 to 255");
                 }
-            }, String.format(java.util.Locale.ROOT,
-                    "Palette slot %d color (current #%06X)", selected, current));
+            }, () -> { });
         }
 
         private static int parseRgb(String input) {
@@ -1547,16 +1594,13 @@ public final class KingdomsMod implements SCRIPT {
         }
 
         private void requestText(String title, java.util.function.Consumer<String> receiver) {
-            VIEW.inters().input.requestInput(value -> {
-                if (value == null) {
-                    return;
-                }
-                String text = value.toString().trim();
+            textInput.open(title, "", value -> {
+                String text = value.trim();
                 if (!text.isEmpty()) {
                     receiver.accept(text);
                     GAME.Notify("Multiplayer action queued");
                 }
-            }, title);
+            }, () -> { });
         }
 
         private void beginFoundingPrompts() {
@@ -1572,28 +1616,20 @@ public final class KingdomsMod implements SCRIPT {
         }
 
         private void requestFoundingName(String title, java.util.function.Consumer<String> receiver) {
-            VIEW.inters().input.requestInput(value -> {
-                if (value == null) {
-                    cancelFoundingPrompt();
-                    return;
-                }
-                String text = value.toString().trim().replaceAll("\\s+", " ");
+            textInput.open(title, "", value -> {
+                String text = value.trim().replaceAll("\\s+", " ");
                 if (!validFoundingName(text)) {
                     GAME.WarnLight("Use 3-32 letters, numbers, spaces, apostrophes, or hyphens");
                     cancelFoundingPrompt();
                     return;
                 }
                 receiver.accept(text);
-            }, title);
+            }, this::cancelFoundingPrompt);
         }
 
         private void requestPlacementReference(String ruler, String kingdom, String capital) {
-            VIEW.inters().input.requestInput(value -> {
-                if (value == null) {
-                    cancelFoundingPrompt();
-                    return;
-                }
-                String placement = value.toString().trim().replaceAll("\\s+", " ");
+            textInput.open("Nearby kingdom name (leave blank for balanced placement)", "", value -> {
+                String placement = value.trim().replaceAll("\\s+", " ");
                 if (!placement.isEmpty() && !validFoundingName(placement)) {
                     GAME.WarnLight("Nearby kingdom must use a valid 3-32 character kingdom name");
                     cancelFoundingPrompt();
@@ -1602,7 +1638,7 @@ public final class KingdomsMod implements SCRIPT {
                 client.submitFounding(ruler, kingdom, capital, placement);
                 foundingPromptActive = false;
                 GAME.Notify("Kingdom founding claim submitted");
-            }, "Nearby kingdom name (leave blank for balanced placement)");
+            }, this::cancelFoundingPrompt);
         }
 
         private void cancelFoundingPrompt() {

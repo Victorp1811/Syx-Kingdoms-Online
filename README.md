@@ -7,7 +7,7 @@ player identity, settlement roster, trade, diplomacy, and armies.
 There is one canonical persistent world: its ID, dimensions, geography seed, and
 terrain-generation version are fixed rather than chosen by individual players.
 
-This repository currently contains the V0.12 playable shared-world vertical slice:
+This repository currently contains the V0.13 playable shared-world vertical slice:
 
 - a dedicated Java server with an atomically persisted world;
 - authenticated, reconnectable player identities;
@@ -44,10 +44,12 @@ This repository currently contains the V0.12 playable shared-world vertical slic
   seasons, war score, and domination/high-score victory conditions;
 - five real days of beginner protection; protected kingdoms cannot be attacked,
   and launching an army ends the attacker's remaining protection;
-- clickable shared-map controls using Songs of Syx's native text prompts;
+- clickable shared-map controls with live, non-modal overlay text entry that does
+  not pause the local city while naming, chatting, trading, or issuing orders;
 - replay-safe commands that are durably saved before acknowledgment;
 - TLS client support for the single public authoritative endpoint;
-- protocol, persistence, and two-client integration tests.
+- protocol, persistence, two-client socket integration, and 48-client restart/
+  reconnect soak tests.
 
 The map panel is currently a multiplayer overlay; it does **not** yet insert
 remote cities as interactive regions into the vanilla world map. That deeper
@@ -91,16 +93,17 @@ build/dist/server/                    dedicated server
 
    Then enable it in the launcher and disable every other mod. The client checks
    Songs of Syx's active-mod list before connecting, and the server also requires
-   the exact `Syx Kingdoms Online@0.12.0` manifest. The installer preserves an
+   the exact `Syx Kingdoms Online@0.13.0` manifest. The installer preserves an
    existing client `config.txt`; pass `-ResetConfig` only when you intentionally
    want the defaults.
-4. Start or load a city. On the first connection, native in-game prompts ask for
-   a ruler name, unique kingdom name, capital name, and an optional existing
+4. Start or load a city. On the first connection, live multiplayer-overlay prompts
+   ask for a ruler name, unique kingdom name, capital name, and an optional existing
    kingdom to settle near. Leave the last prompt blank for balanced deterministic
    placement. The server reserves all names and the city location together, so a
    rejected name never consumes a slot. Identity and a strong authentication
    token are generated automatically under the player's Songs of Syx
-   application-data directory.
+   application-data directory. The city remains at the canonical 1x speed while
+   the player types.
 5. The client log reports the server connection and the
    number of visible online cities. The overlay shows every claimed city on the
    server-defined shared map; your city is orange, online rivals are green, and
@@ -118,8 +121,8 @@ build/dist/server/                    dedicated server
    current offer to receive unsold goods back.
 
    Use **Profile/Crest** to edit a kingdom crest or, with the Sovereign/Herald
-   role, the House crest. The shared 32×32 editor
-   Left-drag paints, right-drag erases, and the sixteen palette slots include one
+   role, the House crest. In the shared 32×32 editor, left-drag paints,
+   right-drag erases, and the sixteen palette slots include one
    transparent slot plus fifteen independently editable RGB colors. The editor
    supports undo, redo, clear, horizontal/vertical mirror, native-banner import,
    and a 128-pixel preview. Saving sends the design to the authoritative server;

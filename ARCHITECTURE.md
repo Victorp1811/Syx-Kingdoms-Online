@@ -71,6 +71,10 @@ render hooks correct the actual speed. The ruleset also disables vanilla AI
 trade, redirects the vanilla world screen, rejects development mode, and binds a
 save to its persistent player/world identity. It publishes population and local
 treasury summaries without granting the server arbitrary access to the local save.
+All multiplayer text and numeric actions use a frame-driven character listener
+rendered inside the overlay. The listener captures gameplay key events while it
+is active and does not enter the game's modal interaction stack, so the settlement
+continues at 1x while the player types.
 
 ## Milestones
 
@@ -102,8 +106,9 @@ treasury summaries without granting the server arbitrary access to the local sav
    public competitive launch.
 9. **Online ruleset hardening (implemented MVP):** connection-gated simulation,
    canonical 1x speed, restricted local inputs/world/trade, development-mode
-   rejection, save identity binding, and a retained resource-debit rollback
-   journal. Non-modal UI and trusted client/account attestation remain future work.
+   rejection, save identity binding, a retained resource-debit rollback journal,
+   and non-modal multiplayer text/numeric input. Trusted client/account attestation
+   remains future work.
 10. **Kingdom identity (implemented MVP):** server-owned 32×32/16-slot crests,
     native-banner import, an in-game pixel editor, large previews, persistence,
     validation, hashes, and revision-aware client caches.
@@ -120,6 +125,10 @@ treasury summaries without granting the server arbitrary access to the local sav
     ownership of all 100 provinces, capital/adjacent claims, occupation influence,
     annexation, blockades, tribute, war score, 30-day seasons, domination victory, high-score
     fallback, and persistent winner state.
+14. **Persistence soak and live input (implemented):** non-modal founding/action
+    prompts with hotkey capture, plus release-gating coverage for 48 clients,
+    eight Houses, four wars, six restarts, reconnect storms, command replay, and
+    thousands of synchronization updates.
 
 ## Non-goals
 

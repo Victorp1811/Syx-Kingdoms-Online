@@ -27,6 +27,8 @@ if ($LASTEXITCODE -ne 0) { throw "Server test compilation failed with exit code 
 foreach ($test in @(
     'syxkingdoms.protocol.ProtocolTest',
     'syxkingdoms.server.WorldPersistenceTest',
+    'syxkingdoms.server.StrategicSystemsTest',
+    'syxkingdoms.server.WorldSoakTest',
     'syxkingdoms.server.ServerIntegrationTest'
 )) {
     & java -cp $classes $test

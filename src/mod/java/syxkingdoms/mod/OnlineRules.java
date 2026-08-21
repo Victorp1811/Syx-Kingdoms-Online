@@ -3,6 +3,8 @@ package syxkingdoms.mod;
 import game.GAME;
 import init.trade.TR;
 import init.trade.TRADABLE;
+import snake2d.KEYCODES;
+import snake2d.KeyBoard;
 import syxkingdoms.protocol.SharedWorld;
 import view.keyboard.KEYS;
 import view.keyboard.KeyPoller;
@@ -11,11 +13,29 @@ import world.WORLD;
 
 /** Enforces the parts of the online ruleset exposed by the public script API. */
 final class OnlineRules {
-    private final KeyPoller inputFilter = events -> {
-        KEYS.get().poll(events);
-        consumeRestrictedKeys();
-    };
+    private final OverlayTextInput textInput;
+    private final KeyPoller inputFilter;
     private long nextWorldWarningAt;
+
+    OnlineRules(OverlayTextInput textInput) {
+        this.textInput = textInput;
+        this.inputFilter = events -> {
+            boolean capture = textInput.capturesGameplayKeys();
+            if (capture) {
+                for (int index = 0; index < events.size(); index++) {
+                    KeyBoard.KeyEvent event = events.get(index);
+                    if (event.code() == KEYCODES.KEY_ESCAPE
+                            && event.action() == KeyBoard.KEYACTION.PRESS
+                            && textInput.active()) {
+                        textInput.cancel();
+                    }
+                }
+            } else {
+                KEYS.get().poll(events);
+            }
+            consumeRestrictedKeys();
+        };
+    }
 
     void enforce(boolean simulationReady) {
         armInputFilter();
@@ -44,6 +64,7 @@ final class OnlineRules {
     }
 
     private void armInputFilter() {
+        textInput.listenForFrame();
         VIEW.setKeyPoller(inputFilter);
     }
 
