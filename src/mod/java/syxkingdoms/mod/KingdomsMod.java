@@ -23,6 +23,7 @@ import view.main.VIEW;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.UUID;
 
 public final class KingdomsMod implements SCRIPT {
@@ -58,6 +59,8 @@ public final class KingdomsMod implements SCRIPT {
     }
 
     private static final class RuntimeInstance implements SCRIPT_INSTANCE, AutoCloseable {
+        private enum OnlineTab { WORLD, CHAT, HOUSE, ARMIES, MARKET, PROFILE }
+        private record UiAction(int x1, int x2, int y1, int y2, String id, boolean enabled) { }
         private static final int CREST_PANEL_X1 = 10;
         private static final int CREST_PANEL_Y1 = 86;
         private static final int CREST_PANEL_X2 = 630;
@@ -126,6 +129,12 @@ public final class KingdomsMod implements SCRIPT {
         private int crestEditY2 = -1;
         private boolean crestEditorOpen;
         private CrestEditorModel crestEditor;
+        private boolean crestEditorForHouse;
+        private OnlineTab activeTab = OnlineTab.WORLD;
+        private List<UiAction> tabActions = List.of();
+        private int selectedHouseIndex;
+        private int selectedHouseRequestIndex;
+        private int selectedWarIndex;
         private boolean foundingPromptActive;
         private long nextFoundingPromptAt;
 
@@ -317,6 +326,11 @@ public final class KingdomsMod implements SCRIPT {
                 renderCrestEditor(renderer);
                 return;
             }
+            renderTabBar(renderer);
+            if (activeTab != OnlineTab.WORLD) {
+                renderActiveTab(renderer);
+                return;
+            }
             Messages.WorldState state = client.worldState();
             int maxCities = client.config().overlayMaxCities();
             int shown = 0;
@@ -376,6 +390,206 @@ public final class KingdomsMod implements SCRIPT {
                     width - 12, rowHeight, socialRows);
         }
 
+        private void renderTabBar(Renderer renderer) {
+            String[] labels = { "World Map", "Chat/Mail", "House", "Armies/Reports", "Market", "Profile/Crest" };
+            int[] widths = { 82, 78, 58, 116, 62, 104 };
+            int x = 10;
+            int y1 = 58;
+            int y2 = 82;
+            for (int i = 0; i < labels.length; i++) {
+                boolean selected = activeTab.ordinal() == i;
+                COLOR fill = selected ? COLOR.ORANGE100
+                        : (inside(x, x + widths[i], y1, y2) ? COLOR.WHITE35 : COLOR.WHITE15);
+                fill.render(renderer, x, x + widths[i], y1, y2);
+                COLOR.WHITE65.renderFrame(renderer, x, x + widths[i], y1, y2, 0, 1);
+                COLOR.WHITE100.bind();
+                UI.FONT().S.render(renderer, labels[i], x + 4, y1 + 3);
+                COLOR.unbind();
+                x += widths[i] + 4;
+            }
+        }
+
+        private void renderActiveTab(Renderer renderer) {
+            int x1 = 10;
+            int y1 = 86;
+            int x2 = 650;
+            int y2 = 548;
+            COLOR.BLACK.render(renderer, x1, x2, y1, y2);
+            COLOR.WHITE35.renderFrame(renderer, x1, x2, y1, y2, 0, 1);
+            List<UiAction> actions = new ArrayList<>();
+            switch (activeTab) {
+                case CHAT -> renderChatTab(renderer, actions, x1 + 10, y1 + 8);
+                case HOUSE -> renderHouseTab(renderer, actions, x1 + 10, y1 + 8);
+                case ARMIES -> renderArmiesTab(renderer, actions, x1 + 10, y1 + 8);
+                case MARKET -> renderMarketTab(renderer, actions, x1 + 10, y1 + 8);
+                case PROFILE -> renderProfileTab(renderer, actions, x1 + 10, y1 + 8);
+                default -> { }
+            }
+            tabActions = List.copyOf(actions);
+        }
+
+        private void renderChatTab(Renderer renderer, List<UiAction> actions, int x, int y) {
+            int row = Math.max(14, UI.FONT().S.height() + 2);
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer, "Local, global, House, and private communication", x, y);
+            y += row + 4;
+            List<Messages.WorldEvent> events = client.recentEvents().stream()
+                    .filter(event -> "CHAT".equals(event.type()) || "LOCAL_CHAT".equals(event.type())
+                            || "HOUSE_CHAT".equals(event.type()) || "MAIL".equals(event.type()))
+                    .toList();
+            int start = Math.max(0, events.size() - 20);
+            for (int i = start; i < events.size(); i++) {
+                UI.FONT().S.render(renderer, truncate(eventLine(events.get(i), client.worldState()), 92), x + 4, y);
+                y += row;
+            }
+            Messages.City selected = selectedCity(client.worldState());
+            UI.FONT().S.render(renderer, selected == null ? "Private recipient: select a city on World Map"
+                    : "Private recipient: " + selected.playerName() + " / " + selected.cityName(), x, 468);
+            COLOR.unbind();
+            addAction(renderer, actions, 20, 105, 500, 526, "CHAT_LOCAL", "Local", true);
+            addAction(renderer, actions, 112, 207, 500, 526, "CHAT_GLOBAL", "Global", true);
+            addAction(renderer, actions, 214, 309, 500, 526, "CHAT_HOUSE", "House", client.ownHouse() != null);
+            addAction(renderer, actions, 316, 411, 500, 526, "CHAT_MAIL", "Private mail", selected != null);
+        }
+
+        private void renderHouseTab(Renderer renderer, List<UiAction> actions, int x, int y) {
+            int row = Math.max(14, UI.FONT().S.height() + 2);
+            Messages.House own = client.ownHouse();
+            Messages.HouseMember membership = client.ownHouseMember();
+            Messages.House viewed = selectedHouse();
+            COLOR.WHITE100.bind();
+            if (own == null) {
+                UI.FONT().S.render(renderer, "You are independent. Create a House or apply to an existing one.", x, y);
+            } else {
+                UI.FONT().S.render(renderer, "Your House: [" + own.tag() + "] " + own.name()
+                        + " | role " + membership.role() + " | members " + own.memberCount() + "/20", x, y);
+                UI.FONT().S.render(renderer, "Announcement: " + truncate(own.announcement().isBlank()
+                        ? "No announcement" : own.announcement(), 80), x, y + row);
+                int memberY = y + row * 3;
+                for (Messages.HouseMember member : client.houseMembers()) {
+                    if (!member.houseId().equals(own.houseId())) continue;
+                    Messages.City city = city(member.playerId(), client.worldState());
+                    UI.FONT().S.render(renderer, member.role() + " - "
+                            + (city == null ? member.playerId() : city.playerName() + " / " + city.kingdomName()),
+                            x + 6, memberY);
+                    memberY += row;
+                }
+            }
+            if (viewed != null) {
+                UI.FONT().S.render(renderer, "House directory: " + (selectedHouseIndex + 1) + "/"
+                        + client.houses().size() + " [" + viewed.tag() + "] " + viewed.name()
+                        + " | members " + viewed.memberCount() + " | points " + viewed.seasonPoints(), x, 384);
+            } else {
+                UI.FONT().S.render(renderer, "House directory is empty", x, 384);
+            }
+            Messages.HouseRequest request = selectedHouseRequest();
+            UI.FONT().S.render(renderer, request == null ? "No visible invitations or applications"
+                    : "Request " + (selectedHouseRequestIndex + 1) + "/" + client.houseRequests().size()
+                    + ": " + request.type() + " player " + shortId(request.playerId()), x, 410);
+            COLOR.unbind();
+            addAction(renderer, actions, 20, 90, 438, 462, "HOUSE_PREV", "Prev", viewed != null);
+            addAction(renderer, actions, 96, 166, 438, 462, "HOUSE_NEXT", "Next", viewed != null);
+            addAction(renderer, actions, 172, 252, 438, 462, "HOUSE_CREATE", "Create", own == null);
+            addAction(renderer, actions, 258, 338, 438, 462, "HOUSE_APPLY", "Apply", own == null && viewed != null);
+            addAction(renderer, actions, 344, 454, 438, 462, "HOUSE_ANNOUNCE", "Announcement", own != null && isHouseOfficer());
+            addAction(renderer, actions, 460, 540, 438, 462, "HOUSE_INVITE", "Invite", own != null && isHouseOfficer() && selectedCity(client.worldState()) != null);
+            addAction(renderer, actions, 546, 630, 438, 462, "HOUSE_LEAVE", "Leave", own != null);
+            addAction(renderer, actions, 20, 100, 474, 498, "REQUEST_PREV", "Req prev", request != null);
+            addAction(renderer, actions, 106, 186, 474, 498, "REQUEST_NEXT", "Req next", request != null);
+            addAction(renderer, actions, 192, 292, 474, 498, "REQUEST_ACCEPT", "Accept", request != null);
+            addAction(renderer, actions, 298, 398, 474, 498, "REQUEST_REJECT", "Reject", request != null);
+            addAction(renderer, actions, 404, 504, 474, 498, "HOUSE_ROLE", "Set role", own != null && "SOVEREIGN".equals(membership.role()) && selectedCity(client.worldState()) != null);
+            addAction(renderer, actions, 510, 610, 474, 498, "HOUSE_KICK", "Kick", own != null && isHouseOfficer() && selectedCity(client.worldState()) != null);
+        }
+
+        private void renderArmiesTab(Renderer renderer, List<UiAction> actions, int x, int y) {
+            int row = Math.max(14, UI.FONT().S.height() + 2);
+            Messages.Season season = client.season();
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer, "Season " + season.number() + " | ends "
+                    + protectionRemaining(season.endsEpochMillis()) + " | victory: 30 provinces or highest score", x, y);
+            y += row * 2;
+            UI.FONT().S.render(renderer, "Wars", x, y);
+            y += row;
+            for (Messages.HouseWar war : client.wars().stream().limit(8).toList()) {
+                UI.FONT().S.render(renderer, war.phase() + " " + houseLabel(war.attackerHouseId())
+                        + " vs " + houseLabel(war.defenderHouseId()) + " | " + war.attackerScore()
+                        + "-" + war.defenderScore(), x + 6, y);
+                y += row;
+            }
+            UI.FONT().S.render(renderer, "Traveling armies", x, y + 4);
+            y += row + 4;
+            for (Messages.Army army : client.armies().stream().limit(6).toList()) {
+                UI.FONT().S.render(renderer, army.mission() + " " + (army.troops() == 0 ? "unknown force" : army.troops() + " levies")
+                        + " | " + shortId(army.ownerPlayerId()) + " -> " + shortId(army.targetPlayerId()), x + 6, y);
+                y += row;
+            }
+            UI.FONT().S.render(renderer, "Reports", x, y + 4);
+            y += row + 4;
+            for (Messages.BattleReport report : client.battleReports().stream().limit(6).toList()) {
+                UI.FONT().S.render(renderer, report.outcome() + " | " + report.attackingTroops()
+                        + " vs " + report.defendingTroops() + " | loot " + report.crownsLooted()
+                        + " | province " + report.provinceX() + "," + report.provinceY(), x + 6, y);
+                y += row;
+            }
+            COLOR.unbind();
+            Messages.City selected = selectedCity(client.worldState());
+            addAction(renderer, actions, 20, 110, 500, 526, "ARMY_ATTACK", "Attack", selected != null && "WAR".equals(effectiveStance(selected.playerId())));
+            addAction(renderer, actions, 116, 226, 500, 526, "ARMY_REINFORCE", "Reinforce", selected != null && sameHouse(selected.playerId()));
+            addAction(renderer, actions, 232, 332, 500, 526, "WAR_DECLARE", "Declare war", client.ownHouse() != null && selectedHouse() != null);
+            addAction(renderer, actions, 338, 438, 500, 526, "WAR_SURRENDER", "Surrender", ownActiveWar() != null);
+            addAction(renderer, actions, 444, 534, 500, 526, "PROVINCE_CLAIM", "Claim/Annex", client.ownHouse() != null);
+            addAction(renderer, actions, 540, 630, 500, 526, "TRIBUTE", "Tribute", client.ownHouse() != null);
+        }
+
+        private void renderMarketTab(Renderer renderer, List<UiAction> actions, int x, int y) {
+            int row = Math.max(14, UI.FONT().S.height() + 2);
+            Messages.MarketOffer selected = selectedMarketOffer();
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer, "Persistent public market", x, y);
+            y += row * 2;
+            for (Messages.MarketOffer offer : client.marketOffers().stream().limit(20).toList()) {
+                UI.FONT().S.render(renderer, offer.quantity() + " " + offer.resourceKey() + " @ "
+                        + offer.unitPrice() + " | " + offer.sellerName() + " | " + shortId(offer.offerId()), x + 6, y);
+                y += row;
+            }
+            COLOR.unbind();
+            addAction(renderer, actions, 20, 125, 500, 526, "MARKET_CREATE", "Create offer", true);
+            addAction(renderer, actions, 132, 212, 500, 526, "MARKET_PREV", "Prev", selected != null);
+            addAction(renderer, actions, 219, 299, 500, 526, "MARKET_NEXT", "Next", selected != null);
+            addAction(renderer, actions, 306, 386, 500, 526, "MARKET_BUY", "Buy", selected != null && !selected.sellerPlayerId().equals(client.ownPlayerId()));
+            addAction(renderer, actions, 393, 483, 500, 526, "MARKET_CANCEL", "Cancel", selected != null && selected.sellerPlayerId().equals(client.ownPlayerId()));
+        }
+
+        private void renderProfileTab(Renderer renderer, List<UiAction> actions, int x, int y) {
+            Messages.City ownCity = city(client.ownPlayerId(), client.worldState());
+            Messages.House ownHouse = client.ownHouse();
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer, ownCity == null ? "Kingdom profile is synchronizing"
+                    : ownCity.playerName() + " | " + ownCity.kingdomName() + " | capital " + ownCity.cityName(), x, y);
+            UI.FONT().S.render(renderer, ownHouse == null ? "Independent kingdom"
+                    : "House [" + ownHouse.tag() + "] " + ownHouse.name(), x, y + 20);
+            COLOR.unbind();
+            CrestDesign kingdom = client.crest(client.ownPlayerId());
+            if (kingdom != null) {
+                renderCrest(renderer, kingdom, 30, 150, 4, true);
+            }
+            if (ownHouse != null) {
+                try {
+                    CrestDesign houseCrest = ownHouse.crest();
+                    if (houseCrest != null) renderCrest(renderer, houseCrest, 220, 150, 4, true);
+                } catch (Exception ignored) { }
+            }
+            addAction(renderer, actions, 20, 160, 500, 526, "CREST_KINGDOM", "Edit kingdom crest", true);
+            addAction(renderer, actions, 168, 298, 500, 526, "CREST_HOUSE", "Edit House crest", ownHouse != null && canEditHouseCrest());
+        }
+
+        private void addAction(Renderer renderer, List<UiAction> actions, int x1, int x2,
+                int y1, int y2, String id, String label, boolean enabled) {
+            actions.add(new UiAction(x1, x2, y1, y2, id, enabled));
+            renderButton(renderer, x1, x2, y1, y2, label, enabled);
+        }
+
         private void renderStartupError(Renderer renderer, String error) {
             int x1 = 10;
             int y1 = 86;
@@ -419,6 +633,7 @@ public final class KingdomsMod implements SCRIPT {
                 COLOR.WHITE10.render(renderer, gridX, gridX + 1, mapY1 + 1, mapY2 - 1);
                 COLOR.WHITE10.render(renderer, mapX1 + 1, mapX2 - 1, gridY, gridY + 1);
             }
+            renderProvinceBorders(renderer, mapX1, mapY1, mapWidth, mapHeight);
             renderArmies(renderer, state, mapX1, mapY1, drawableWidth, drawableHeight);
             Messages.City hovered = null;
             hoveredPlayerId = null;
@@ -451,6 +666,7 @@ public final class KingdomsMod implements SCRIPT {
                             + state.cities().size() + " cities",
                     mapX1, headerY + 1);
             if (hovered != null) {
+                Messages.Province province = provinceAt(SharedWorld.sectorX(hovered.x()), SharedWorld.sectorY(hovered.y()));
                 String detail = hovered.cityName() + " - " + hovered.kingdomName()
                         + " (" + hovered.playerName() + ")"
                         + " | " + (hovered.online() ? "online" : "offline")
@@ -458,7 +674,11 @@ public final class KingdomsMod implements SCRIPT {
                         + " | " + effectiveStance(hovered.playerId()).toLowerCase()
                         + " | sector " + (SharedWorld.sectorX(hovered.x()) + 1) + ","
                         + (SharedWorld.sectorY(hovered.y()) + 1)
-                        + " | " + hovered.x() + "," + hovered.y();
+                        + " | " + hovered.x() + "," + hovered.y()
+                        + (province == null || province.ownerHouseId().isBlank() ? " | neutral province"
+                        : " | owner " + houseLabel(province.ownerHouseId())
+                        + (province.occupierHouseId().isBlank() ? "" : " | occupied by "
+                        + houseLabel(province.occupierHouseId()) + " " + province.occupationInfluence() + "%"));
                 int tooltipY = Math.min(mapY2 - rowHeight, Math.max(mapY1 + 2, mouseY + 8));
                 COLOR.unbind();
                 COLOR.BLACK.render(renderer, mapX1 + 4, mapX2 - 4, tooltipY, tooltipY + rowHeight);
@@ -480,13 +700,37 @@ public final class KingdomsMod implements SCRIPT {
             COLOR.unbind();
         }
 
+        private void renderProvinceBorders(Renderer renderer, int mapX1, int mapY1, int mapWidth, int mapHeight) {
+            for (Messages.Province province : client.provinces()) {
+                if (province.ownerHouseId().isBlank()) continue;
+                int px1 = mapX1 + province.x() * mapWidth / SharedWorld.LINEAR_SCALE;
+                int px2 = mapX1 + (province.x() + 1) * mapWidth / SharedWorld.LINEAR_SCALE;
+                int py1 = mapY1 + province.y() * mapHeight / SharedWorld.LINEAR_SCALE;
+                int py2 = mapY1 + (province.y() + 1) * mapHeight / SharedWorld.LINEAR_SCALE;
+                int hash = province.ownerHouseId().hashCode();
+                ColorImp.TMP.set(70 + Math.floorMod(hash, 150),
+                        70 + Math.floorMod(hash >>> 8, 150),
+                        70 + Math.floorMod(hash >>> 16, 150))
+                        .renderFrame(renderer, px1 + 1, px2 - 1, py1 + 1, py2 - 1, 0, 2);
+                if (!province.occupierHouseId().isBlank()) {
+                    COLOR.RED100.renderFrame(renderer, px1 + 4, px2 - 4, py1 + 4, py2 - 4, 0, 1);
+                }
+            }
+        }
+
+        private Messages.Province provinceAt(int x, int y) {
+            return client.provinces().stream().filter(province -> province.x() == x && province.y() == y)
+                    .findFirst().orElse(null);
+        }
+
         private void renderCrestEditor(Renderer renderer) {
             updateCrestStroke();
             COLOR.BLACK.render(renderer, CREST_PANEL_X1, CREST_PANEL_X2, CREST_PANEL_Y1, CREST_PANEL_Y2);
             COLOR.WHITE65.renderFrame(renderer, CREST_PANEL_X1, CREST_PANEL_X2,
                     CREST_PANEL_Y1, CREST_PANEL_Y2, 0, 2);
             COLOR.WHITE100.bind();
-            UI.FONT().S.render(renderer, "Kingdom crest editor - 32x32 pixels - 16 palette slots",
+            UI.FONT().S.render(renderer, (crestEditorForHouse ? "House" : "Kingdom")
+                    + " crest editor - 32x32 pixels - 16 palette slots",
                     CREST_PANEL_X1 + 12, CREST_PANEL_Y1 + 8);
             UI.FONT().S.render(renderer, "Left-drag paints | right-drag erases | slot 0 is transparent",
                     CREST_PANEL_X1 + 12, CREST_PANEL_Y1 + 24);
@@ -623,7 +867,8 @@ public final class KingdomsMod implements SCRIPT {
             renderButton(renderer, mailX1, mailX2, actionY1, actionY2, "Mail", selected != null);
             renderButton(renderer, neutralX1, neutralX2, actionY1, actionY2, "Neutral", selected != null);
             renderButton(renderer, allyX1, allyX2, actionY1, actionY2, "Ally", selected != null);
-            renderButton(renderer, warX1, warX2, actionY1, actionY2, "War", selected != null);
+            renderButton(renderer, warX1, warX2, actionY1, actionY2, "War", selected != null
+                    && client.ownHouse() != null && !sameHouse(selected.playerId()));
 
             strategicY1 = actionY2 + 3;
             strategicY2 = strategicY1 + rowHeight + 2;
@@ -732,6 +977,62 @@ public final class KingdomsMod implements SCRIPT {
             return offers.get(marketOfferIndex);
         }
 
+        private Messages.House selectedHouse() {
+            List<Messages.House> houses = client.houses();
+            if (houses.isEmpty()) {
+                selectedHouseIndex = 0;
+                return null;
+            }
+            selectedHouseIndex = Math.floorMod(selectedHouseIndex, houses.size());
+            return houses.get(selectedHouseIndex);
+        }
+
+        private Messages.HouseRequest selectedHouseRequest() {
+            List<Messages.HouseRequest> requests = client.houseRequests();
+            if (requests.isEmpty()) {
+                selectedHouseRequestIndex = 0;
+                return null;
+            }
+            selectedHouseRequestIndex = Math.floorMod(selectedHouseRequestIndex, requests.size());
+            return requests.get(selectedHouseRequestIndex);
+        }
+
+        private Messages.HouseWar ownActiveWar() {
+            Messages.House own = client.ownHouse();
+            if (own == null) return null;
+            List<Messages.HouseWar> wars = client.wars().stream()
+                    .filter(war -> war.attackerHouseId().equals(own.houseId())
+                            || war.defenderHouseId().equals(own.houseId())).toList();
+            if (wars.isEmpty()) {
+                selectedWarIndex = 0;
+                return null;
+            }
+            selectedWarIndex = Math.floorMod(selectedWarIndex, wars.size());
+            return wars.get(selectedWarIndex);
+        }
+
+        private String houseLabel(String houseId) {
+            return client.houses().stream().filter(house -> house.houseId().equals(houseId))
+                    .map(house -> "[" + house.tag() + "] " + house.name()).findFirst().orElse(shortId(houseId));
+        }
+
+        private boolean sameHouse(String playerId) {
+            Messages.HouseMember own = client.ownHouseMember();
+            return own != null && client.houseMembers().stream().anyMatch(member -> member.playerId().equals(playerId)
+                    && member.houseId().equals(own.houseId()));
+        }
+
+        private boolean isHouseOfficer() {
+            Messages.HouseMember own = client.ownHouseMember();
+            return own != null && ("SOVEREIGN".equals(own.role()) || "MARSHAL".equals(own.role())
+                    || "STEWARD".equals(own.role()));
+        }
+
+        private boolean canEditHouseCrest() {
+            Messages.HouseMember own = client.ownHouseMember();
+            return own != null && ("SOVEREIGN".equals(own.role()) || "HERALD".equals(own.role()));
+        }
+
         private String effectiveStance(String playerId) {
             for (Messages.Relation relation : client.relations()) {
                 if (relation.playerId().equals(playerId)) {
@@ -745,6 +1046,7 @@ public final class KingdomsMod implements SCRIPT {
             return switch (event.type()) {
                 case "CHAT" -> "[Global] " + event.actorName() + ": " + event.text();
                 case "LOCAL_CHAT" -> "[Local] " + event.actorName() + ": " + event.text();
+                case "HOUSE_CHAT" -> "[House] " + event.actorName() + ": " + event.text();
                 case "CREST_UPDATED" -> "[Crest] " + event.actorName() + " updated their kingdom crest";
                 case "MAIL" -> "[Mail] " + event.actorName() + ": " + event.text();
                 case "STANCE" -> "[Diplomacy] " + event.actorName() + " -> "
@@ -772,6 +1074,22 @@ public final class KingdomsMod implements SCRIPT {
                         + event.text() + ", capital " + event.argument();
                 case "PROTECTION_ENDED" -> "[World] " + event.actorName()
                         + " ended beginner protection by launching an army";
+                case "HOUSE_CREATED" -> "[House] " + event.actorName() + " founded ["
+                        + event.argument() + "] " + event.text();
+                case "HOUSE_JOINED" -> "[House] " + event.text() + " joined " + event.actorName();
+                case "HOUSE_LEFT" -> "[House] " + event.actorName() + " left " + event.text();
+                case "HOUSE_ANNOUNCEMENT" -> "[House] " + event.actorName() + ": " + event.text();
+                case "WAR_DECLARED" -> "[War] " + event.text() + " declared on " + event.argument()
+                        + "; preparation ends at " + event.value1();
+                case "WAR_ACTIVE" -> "[War] Fighting is active: " + event.text();
+                case "WAR_SURRENDERED" -> "[War] " + event.text() + " surrendered";
+                case "PROVINCE_CLAIMED" -> "[Province] " + event.text() + " claimed "
+                        + event.value1() + "," + event.value2();
+                case "TRIBUTE_COLLECTED" -> "[Province] " + event.actorName() + " collected "
+                        + event.value1() + " tribute";
+                case "REINFORCEMENT_SENT" -> "[Army] " + event.actorName() + " sent "
+                        + event.value1() + " reinforcements";
+                case "SEASON_WON" -> "[Season] " + event.text() + " won season " + event.value1();
                 default -> "[" + event.type() + "] " + event.actorName() + " " + event.text();
             };
         }
@@ -847,6 +1165,13 @@ public final class KingdomsMod implements SCRIPT {
             if (button != MButt.LEFT) {
                 return;
             }
+            if (switchTabAtMouse()) {
+                return;
+            }
+            if (activeTab != OnlineTab.WORLD) {
+                handleTabAction();
+                return;
+            }
             if (inside(crestEditX1, crestEditX2, crestEditY1, crestEditY2)) {
                 openCrestEditor();
                 return;
@@ -877,7 +1202,7 @@ public final class KingdomsMod implements SCRIPT {
                 } else if (insideX(allyX1, allyX2)) {
                     queueStance(selected, "ALLY");
                 } else if (insideX(warX1, warX2)) {
-                    queueStance(selected, "WAR");
+                    queueWarDeclaration(selected);
                 }
                 return;
             }
@@ -931,13 +1256,133 @@ public final class KingdomsMod implements SCRIPT {
             }
         }
 
+        private boolean switchTabAtMouse() {
+            if (mouseY < 58 || mouseY >= 82) return false;
+            int[] widths = { 82, 78, 58, 116, 62, 104 };
+            int x = 10;
+            for (int i = 0; i < widths.length; i++) {
+                if (mouseX >= x && mouseX < x + widths[i]) {
+                    activeTab = OnlineTab.values()[i];
+                    tabActions = List.of();
+                    return true;
+                }
+                x += widths[i] + 4;
+            }
+            return false;
+        }
+
+        private void handleTabAction() {
+            UiAction clicked = tabActions.stream().filter(action -> action.enabled()
+                    && inside(action.x1(), action.x2(), action.y1(), action.y2())).findFirst().orElse(null);
+            if (clicked == null) return;
+            Messages.City selected = selectedCity(client.worldState());
+            Messages.House house = selectedHouse();
+            Messages.HouseRequest request = selectedHouseRequest();
+            Messages.MarketOffer offer = selectedMarketOffer();
+            switch (clicked.id()) {
+                case "CHAT_LOCAL" -> requestText("Local province chat", client::sendLocalChat);
+                case "CHAT_GLOBAL" -> requestText("Global multiplayer chat", client::sendGlobalChat);
+                case "CHAT_HOUSE" -> requestText("House chat", client::sendHouseChat);
+                case "CHAT_MAIL" -> requestText("Private mail to " + selected.cityName(),
+                        text -> client.sendMail(selected.playerId(), text));
+                case "HOUSE_PREV" -> selectedHouseIndex--;
+                case "HOUSE_NEXT" -> selectedHouseIndex++;
+                case "HOUSE_CREATE" -> requestText("New House name (3-32 characters)", name ->
+                        requestText("House tag (3-5 letters/numbers)", tag -> client.createHouse(name, tag)));
+                case "HOUSE_APPLY" -> {
+                    client.applyToHouse(house.houseId());
+                    GAME.Notify("House application queued");
+                }
+                case "HOUSE_ANNOUNCE" -> requestText("House announcement", client::setHouseAnnouncement);
+                case "HOUSE_INVITE" -> client.inviteToHouse(selected.playerId());
+                case "HOUSE_LEAVE" -> {
+                    client.leaveHouse();
+                    GAME.Notify("House departure queued; leadership rules are server-validated");
+                }
+                case "REQUEST_PREV" -> selectedHouseRequestIndex--;
+                case "REQUEST_NEXT" -> selectedHouseRequestIndex++;
+                case "REQUEST_ACCEPT" -> client.acceptHouseRequest(request.requestId());
+                case "REQUEST_REJECT" -> client.rejectHouseRequest(request.requestId());
+                case "HOUSE_ROLE" -> requestText("Role: SOVEREIGN, MARSHAL, STEWARD, HERALD, or MEMBER",
+                        role -> client.setHouseRole(selected.playerId(), role));
+                case "HOUSE_KICK" -> client.kickHouseMember(selected.playerId());
+                case "ARMY_ATTACK" -> requestPositiveLong("Levies to send against " + selected.cityName(),
+                        amount -> {
+                            if (amount <= Integer.MAX_VALUE) client.sendArmy(selected.playerId(), (int) amount);
+                        });
+                case "ARMY_REINFORCE" -> requestPositiveLong("Levies to reinforce " + selected.cityName(),
+                        amount -> {
+                            if (amount <= Integer.MAX_VALUE) client.sendReinforcement(selected.playerId(), (int) amount);
+                        });
+                case "WAR_DECLARE" -> {
+                    client.declareHouseWar(house.houseId());
+                    GAME.WarnLight("War declaration queued: 12-hour preparation, then seven days active");
+                }
+                case "WAR_SURRENDER" -> client.surrenderHouseWar(ownActiveWar().warId());
+                case "PROVINCE_CLAIM" -> requestProvince("Claim or annex province (X Y, values 0-9)",
+                        (x, y) -> {
+                            Messages.Province province = provinceAt(x, y);
+                            Messages.House own = client.ownHouse();
+                            if (province != null && own != null && !province.ownerHouseId().isBlank()
+                                    && !province.ownerHouseId().equals(own.houseId())) {
+                                client.annexProvince(x, y);
+                            } else {
+                                client.claimProvince(x, y);
+                            }
+                        });
+                case "TRIBUTE" -> requestProvince("Collect tribute from province (X Y)",
+                        (x, y) -> client.collectTribute(x, y));
+                case "MARKET_CREATE" -> requestText("Create market offer (RESOURCE QUANTITY UNIT_PRICE)",
+                        this::queueMarketOffer);
+                case "MARKET_PREV" -> marketOfferIndex--;
+                case "MARKET_NEXT" -> marketOfferIndex++;
+                case "MARKET_BUY" -> requestPositiveLong("Quantity to buy from " + offer.sellerName(),
+                        amount -> { if (amount <= Integer.MAX_VALUE) client.buyMarketOffer(offer.offerId(), (int) amount); });
+                case "MARKET_CANCEL" -> client.cancelMarketOffer(offer.offerId());
+                case "CREST_KINGDOM" -> openCrestEditor(false);
+                case "CREST_HOUSE" -> openCrestEditor(true);
+                default -> { }
+            }
+        }
+
+        @FunctionalInterface
+        private interface ProvinceConsumer { void accept(int x, int y); }
+
+        private void requestProvince(String title, ProvinceConsumer consumer) {
+            requestText(title, text -> {
+                String[] parts = text.trim().split("[\\s,]+");
+                try {
+                    if (parts.length != 2) throw new NumberFormatException();
+                    int x = Integer.parseInt(parts[0]);
+                    int y = Integer.parseInt(parts[1]);
+                    if (x < 0 || x > 9 || y < 0 || y > 9) throw new NumberFormatException();
+                    consumer.accept(x, y);
+                } catch (NumberFormatException e) {
+                    GAME.WarnLight("Enter two province coordinates from 0 to 9");
+                }
+            });
+        }
+
         private void openCrestEditor() {
-            CrestDesign current = client.crest(client.ownPlayerId());
+            openCrestEditor(false);
+        }
+
+        private void openCrestEditor(boolean forHouse) {
+            CrestDesign current = null;
+            if (forHouse) {
+                try {
+                    Messages.House house = client.ownHouse();
+                    current = house == null ? null : house.crest();
+                } catch (Exception ignored) { }
+            } else {
+                current = client.crest(client.ownPlayerId());
+            }
             crestEditor = new CrestEditorModel(current == null ? importNativeCrest() : current);
+            crestEditorForHouse = forHouse;
             crestEditorOpen = true;
             GAME.Notify(current == null
                     ? "Imported the current Songs of Syx banner into the 32x32 crest editor"
-                    : "Opened the synchronized kingdom crest");
+                    : "Opened the synchronized " + (forHouse ? "House" : "kingdom") + " crest");
         }
 
         private void handleCrestEditorClick(MButt button) {
@@ -989,13 +1434,14 @@ public final class KingdomsMod implements SCRIPT {
                     GAME.WarnLight("A kingdom crest must contain at least one visible pixel");
                     return;
                 }
-                String commandId = client.setCrest(crestEditor.design());
+                String commandId = crestEditorForHouse
+                        ? client.setHouseCrest(crestEditor.design()) : client.setCrest(crestEditor.design());
                 if (commandId.isBlank()) {
                     GAME.WarnLight("The multiplayer command queue is full; try saving again shortly");
                     return;
                 }
                 crestEditorOpen = false;
-                GAME.Notify("Kingdom crest queued for server validation");
+                GAME.Notify((crestEditorForHouse ? "House" : "Kingdom") + " crest queued for server validation");
             } else if (inside(120, 210, 516, 540)) {
                 crestEditorOpen = false;
                 crestEditor = null;
@@ -1194,6 +1640,17 @@ public final class KingdomsMod implements SCRIPT {
         private void queueStance(Messages.City selected, String stance) {
             client.setStance(selected.playerId(), stance);
             GAME.Notify("Diplomacy action queued: " + stance + " toward " + selected.cityName());
+        }
+
+        private void queueWarDeclaration(Messages.City selected) {
+            Messages.HouseMember targetMember = client.houseMembers().stream()
+                    .filter(member -> member.playerId().equals(selected.playerId())).findFirst().orElse(null);
+            if (client.ownHouse() == null || targetMember == null) {
+                GAME.WarnLight("Both kingdoms must belong to Houses before formal war can be declared");
+                return;
+            }
+            client.declareHouseWar(targetMember.houseId());
+            GAME.WarnLight("Formal war queued: 12-hour preparation, then up to seven days of fighting");
         }
 
         private void requestPositiveLong(String title, java.util.function.LongConsumer receiver) {

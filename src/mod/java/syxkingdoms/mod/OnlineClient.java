@@ -39,7 +39,7 @@ final class OnlineClient implements AutoCloseable {
     record FoundingProfile(String rulerName, String kingdomName, String capitalName, String placementReference) {
     }
 
-    private static final String MOD_VERSION = "0.9.0";
+    private static final String MOD_VERSION = "0.12.0";
     private static final Set<String> FOUNDING_ERROR_CODES = Set.of(
             "FOUNDING_REQUIRED", "BAD_FOUNDING_NAME", "RESERVED_NAME",
             "RULER_NAME_TAKEN", "KINGDOM_NAME_TAKEN", "CAPITAL_NAME_TAKEN",
@@ -67,6 +67,13 @@ final class OnlineClient implements AutoCloseable {
     private volatile Messages.PlayerState playerState = new Messages.PlayerState(0, 0, 0);
     private volatile List<Messages.Delivery> deliveries = List.of();
     private volatile List<Messages.MarketOffer> marketOffers = List.of();
+    private volatile List<Messages.House> houses = List.of();
+    private volatile List<Messages.HouseMember> houseMembers = List.of();
+    private volatile List<Messages.HouseRequest> houseRequests = List.of();
+    private volatile List<Messages.Province> provinces = List.of();
+    private volatile List<Messages.HouseWar> wars = List.of();
+    private volatile List<Messages.BattleReport> battleReports = List.of();
+    private volatile Messages.Season season = new Messages.Season(1, 0, 1, "", "ACTIVE");
     private final Map<String, CrestDesign> crests = new ConcurrentHashMap<>();
     private final Map<String, Long> crestRevisions = new ConcurrentHashMap<>();
     private volatile long eventCursor;
@@ -179,6 +186,25 @@ final class OnlineClient implements AutoCloseable {
         return marketOffers;
     }
 
+    List<Messages.House> houses() { return houses; }
+    List<Messages.HouseMember> houseMembers() { return houseMembers; }
+    List<Messages.HouseRequest> houseRequests() { return houseRequests; }
+    List<Messages.Province> provinces() { return provinces; }
+    List<Messages.HouseWar> wars() { return wars; }
+    List<Messages.BattleReport> battleReports() { return battleReports; }
+    Messages.Season season() { return season; }
+
+    Messages.HouseMember ownHouseMember() {
+        return houseMembers.stream().filter(member -> member.playerId().equals(identity.playerId()))
+                .findFirst().orElse(null);
+    }
+
+    Messages.House ownHouse() {
+        Messages.HouseMember member = ownHouseMember();
+        return member == null ? null : houses.stream().filter(house -> house.houseId().equals(member.houseId()))
+                .findFirst().orElse(null);
+    }
+
     CrestDesign crest(String playerId) {
         return crests.get(playerId);
     }
@@ -205,6 +231,26 @@ final class OnlineClient implements AutoCloseable {
             throw new IllegalArgumentException("Crest is required");
         }
         return queueCommand("SET_CREST", "", crest.pixelsEncoded(), 0, 0, crest.paletteHex());
+    }
+
+    String createHouse(String name, String tag) { return queueCommand("CREATE_HOUSE", "", tag, 0, 0, name); }
+    String applyToHouse(String houseId) { return queueCommand("APPLY_HOUSE", "", houseId, 0, 0, ""); }
+    String inviteToHouse(String playerId) { return queueCommand("INVITE_HOUSE", playerId, "", 0, 0, ""); }
+    String acceptHouseRequest(String requestId) { return queueCommand("ACCEPT_HOUSE_REQUEST", "", requestId, 0, 0, ""); }
+    String rejectHouseRequest(String requestId) { return queueCommand("REJECT_HOUSE_REQUEST", "", requestId, 0, 0, ""); }
+    String leaveHouse() { return queueCommand("LEAVE_HOUSE", "", "", 0, 0, ""); }
+    String kickHouseMember(String playerId) { return queueCommand("KICK_HOUSE", playerId, "", 0, 0, ""); }
+    String setHouseRole(String playerId, String role) { return queueCommand("SET_HOUSE_ROLE", playerId, role, 0, 0, ""); }
+    String setHouseAnnouncement(String text) { return queueCommand("HOUSE_ANNOUNCEMENT", "", "", 0, 0, text); }
+    String sendHouseChat(String text) { return queueCommand("HOUSE_CHAT", "", "", 0, 0, text); }
+    String setHouseCrest(CrestDesign crest) { return queueCommand("SET_HOUSE_CREST", "", crest.pixelsEncoded(), 0, 0, crest.paletteHex()); }
+    String declareHouseWar(String targetHouseId) { return queueCommand("DECLARE_HOUSE_WAR", "", targetHouseId, 0, 0, ""); }
+    String surrenderHouseWar(String warId) { return queueCommand("SURRENDER_HOUSE_WAR", "", warId, 0, 0, ""); }
+    String claimProvince(int x, int y) { return queueCommand("CLAIM_PROVINCE", "", "", x, y, ""); }
+    String annexProvince(int x, int y) { return queueCommand("ANNEX_PROVINCE", "", "", x, y, ""); }
+    String collectTribute(int x, int y) { return queueCommand("COLLECT_TRIBUTE", "", "", x, y, ""); }
+    String sendReinforcement(String targetPlayerId, int troops) {
+        return queueCommand("SEND_REINFORCEMENT", targetPlayerId, "", troops, 0, "");
     }
 
     String sendMail(String targetPlayerId, String text) {
@@ -444,6 +490,76 @@ final class OnlineClient implements AutoCloseable {
             previousCrestRevision = crest.revision();
             newCrests.add(crest);
         }
+        Messages.HousesHeader housesHeader = Messages.HousesHeader.decode(LineIO.readLine(socket.getInputStream()));
+        List<Messages.House> newHouses = new ArrayList<>(housesHeader.houseCount());
+        Set<String> houseIds = new HashSet<>();
+        for (int i = 0; i < housesHeader.houseCount(); i++) {
+            Messages.House house = Messages.House.decode(LineIO.readLine(socket.getInputStream()));
+            if (!houseIds.add(house.houseId()) || !playerIds.contains(house.sovereignPlayerId())) {
+                throw new ProtocolException("BAD_HOUSES", "Server sent duplicate or invalid House state");
+            }
+            newHouses.add(house);
+        }
+        Messages.HouseMembersHeader membersHeader = Messages.HouseMembersHeader.decode(LineIO.readLine(socket.getInputStream()));
+        List<Messages.HouseMember> newMembers = new ArrayList<>(membersHeader.memberCount());
+        Set<String> memberIds = new HashSet<>();
+        for (int i = 0; i < membersHeader.memberCount(); i++) {
+            Messages.HouseMember member = Messages.HouseMember.decode(LineIO.readLine(socket.getInputStream()));
+            if (!memberIds.add(member.playerId()) || !playerIds.contains(member.playerId())
+                    || !houseIds.contains(member.houseId())) {
+                throw new ProtocolException("BAD_HOUSE_MEMBERS", "Server sent invalid House membership");
+            }
+            newMembers.add(member);
+        }
+        Messages.HouseRequestsHeader requestsHeader = Messages.HouseRequestsHeader.decode(LineIO.readLine(socket.getInputStream()));
+        List<Messages.HouseRequest> newRequests = new ArrayList<>(requestsHeader.requestCount());
+        Set<String> requestIds = new HashSet<>();
+        for (int i = 0; i < requestsHeader.requestCount(); i++) {
+            Messages.HouseRequest request = Messages.HouseRequest.decode(LineIO.readLine(socket.getInputStream()));
+            if (!requestIds.add(request.requestId()) || !houseIds.contains(request.houseId())
+                    || !playerIds.contains(request.playerId())) {
+                throw new ProtocolException("BAD_HOUSE_REQUESTS", "Server sent invalid House request");
+            }
+            newRequests.add(request);
+        }
+        Messages.ProvincesHeader provincesHeader = Messages.ProvincesHeader.decode(LineIO.readLine(socket.getInputStream()));
+        List<Messages.Province> newProvinces = new ArrayList<>(provincesHeader.provinceCount());
+        Set<String> provinceIds = new HashSet<>();
+        for (int i = 0; i < provincesHeader.provinceCount(); i++) {
+            Messages.Province province = Messages.Province.decode(LineIO.readLine(socket.getInputStream()));
+            if (!provinceIds.add(province.x() + "," + province.y())
+                    || (!province.ownerHouseId().isBlank() && !houseIds.contains(province.ownerHouseId()))
+                    || (!province.occupierHouseId().isBlank() && !houseIds.contains(province.occupierHouseId()))) {
+                throw new ProtocolException("BAD_PROVINCES", "Server sent invalid province state");
+            }
+            newProvinces.add(province);
+        }
+        if (newProvinces.size() != SharedWorld.SECTOR_COUNT) {
+            throw new ProtocolException("BAD_PROVINCES", "Server must synchronize exactly 100 provinces");
+        }
+        Messages.WarsHeader warsHeader = Messages.WarsHeader.decode(LineIO.readLine(socket.getInputStream()));
+        List<Messages.HouseWar> newWars = new ArrayList<>(warsHeader.warCount());
+        Set<String> warIds = new HashSet<>();
+        for (int i = 0; i < warsHeader.warCount(); i++) {
+            Messages.HouseWar war = Messages.HouseWar.decode(LineIO.readLine(socket.getInputStream()));
+            if (!warIds.add(war.warId()) || !houseIds.contains(war.attackerHouseId())
+                    || !houseIds.contains(war.defenderHouseId())) {
+                throw new ProtocolException("BAD_WARS", "Server sent invalid House war state");
+            }
+            newWars.add(war);
+        }
+        Messages.ReportsHeader reportsHeader = Messages.ReportsHeader.decode(LineIO.readLine(socket.getInputStream()));
+        List<Messages.BattleReport> newReports = new ArrayList<>(reportsHeader.reportCount());
+        Set<String> reportIds = new HashSet<>();
+        for (int i = 0; i < reportsHeader.reportCount(); i++) {
+            Messages.BattleReport report = Messages.BattleReport.decode(LineIO.readLine(socket.getInputStream()));
+            if (!reportIds.add(report.reportId()) || !playerIds.contains(report.attackerPlayerId())
+                    || !playerIds.contains(report.defenderPlayerId())) {
+                throw new ProtocolException("BAD_REPORTS", "Server sent invalid battle report");
+            }
+            newReports.add(report);
+        }
+        Messages.Season newSeason = Messages.Season.decode(LineIO.readLine(socket.getInputStream()));
         Messages.RelationsHeader relationsHeader = Messages.RelationsHeader.decode(
                 LineIO.readLine(socket.getInputStream()));
         List<Messages.Relation> newRelations = new ArrayList<>(relationsHeader.relationCount());
@@ -514,6 +630,13 @@ final class OnlineClient implements AutoCloseable {
         armies = List.copyOf(newArmies);
         deliveries = List.copyOf(newDeliveries);
         marketOffers = List.copyOf(newMarketOffers);
+        houses = List.copyOf(newHouses);
+        houseMembers = List.copyOf(newMembers);
+        houseRequests = List.copyOf(newRequests);
+        provinces = List.copyOf(newProvinces);
+        wars = List.copyOf(newWars);
+        battleReports = List.copyOf(newReports);
+        season = newSeason;
         eventCursor = eventsHeader.cursor();
         crestCursor = crestsHeader.cursor();
         lastServerSyncNanos = System.nanoTime();

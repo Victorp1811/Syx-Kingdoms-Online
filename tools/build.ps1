@@ -55,6 +55,7 @@ $testClasspath = $testClasses.FullName
 foreach ($test in @(
     'syxkingdoms.protocol.ProtocolTest',
     'syxkingdoms.server.WorldPersistenceTest',
+    'syxkingdoms.server.StrategicSystemsTest',
     'syxkingdoms.server.ServerIntegrationTest'
 )) {
     & java -cp $testClasspath $test

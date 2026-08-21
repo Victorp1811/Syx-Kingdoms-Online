@@ -41,8 +41,6 @@ public final class WorldPersistenceTest {
         world.heartbeat("alice-id", new Messages.Heartbeat(1, 1200, 5555));
         Messages.Command persistentChat = new Messages.Command("persistent-chat", "CHAT", "", "",
                 0, 0, "The world remembers");
-        Messages.Command persistentStance = new Messages.Command("persistent-stance", "STANCE", "bob-id", "WAR",
-                0, 0, "");
         Messages.Command persistentArmy = new Messages.Command("persistent-army", "SEND_ARMY", "bob-id", "",
                 20, 0, "");
         Messages.Command persistentShipment = new Messages.Command("persistent-shipment", "SEND_RESOURCE", "bob-id",
@@ -51,12 +49,29 @@ public final class WorldPersistenceTest {
                 "STONE", 30, 2, "");
         World.SyncResult social = world.applyUpdate("alice-id",
                 new Messages.ClientUpdate(2, 1200, 5555, 0, 0,
-                        List.of(persistentChat, persistentShipment, persistentStance, persistentArmy, persistentOffer)));
+                        List.of(persistentChat, persistentShipment, persistentOffer)));
         check(social.commandResults().stream().allMatch(Messages.CommandResult::accepted),
                 "persistent social commands accepted");
-        check(social.playerState().levies() == 80 && social.armies().size() == 1,
+        World.SyncResult aliceHouse = world.applyUpdate("alice-id", new Messages.ClientUpdate(3, 1200, 5555,
+                social.eventCursor(), 0, List.of(new Messages.Command("alice-house-01", "CREATE_HOUSE", "",
+                "OAK", 0, 0, "Oak Alliance"))));
+        World.SyncResult bobHouse = world.applyUpdate("bob-id", new Messages.ClientUpdate(2, 0, 0,
+                0, 0, List.of(new Messages.Command("bob-house-0001", "CREATE_HOUSE", "",
+                "ASH", 0, 0, "Ash League"))));
+        check(aliceHouse.commandResults().getFirst().accepted() && bobHouse.commandResults().getFirst().accepted(),
+                "persistent Houses created");
+        World.SyncResult declaration = world.applyUpdate("alice-id", new Messages.ClientUpdate(4, 1200, 5555,
+                aliceHouse.eventCursor(), 0, List.of(new Messages.Command("persistent-war", "DECLARE_HOUSE_WAR", "",
+                "bob-house-0001", 0, 0, ""))));
+        check(declaration.commandResults().getFirst().accepted()
+                && "PREPARING".equals(declaration.wars().getFirst().phase()), "formal war preparation persisted");
+        world.resolveStrategicTime(System.currentTimeMillis() + 13L * 3_600_000L);
+        World.SyncResult military = world.applyUpdate("alice-id", new Messages.ClientUpdate(5, 1200, 5555,
+                declaration.eventCursor(), 0, List.of(persistentArmy)));
+        check(military.commandResults().getFirst().accepted(), "army accepted during active formal war");
+        check(military.playerState().levies() == 80 && military.armies().size() == 1,
                 "persistent army committed from server levies");
-        long armyArrival = social.armies().getFirst().arrivesEpochMillis();
+        long armyArrival = military.armies().getFirst().arrivesEpochMillis();
         long shipmentArrival = social.events().stream()
                 .filter(event -> "SHIPMENT_SENT".equals(event.type()))
                 .mapToLong(Messages.WorldEvent::value2).findFirst().orElseThrow();
@@ -69,7 +84,7 @@ public final class WorldPersistenceTest {
         try (var reader = Files.newBufferedReader(config.worldFile())) {
             persisted.load(reader);
         }
-        check("9".equals(persisted.getProperty("format")), "persistent world format");
+        check("12".equals(persisted.getProperty("format")), "persistent world format");
         check(Integer.toString(SharedWorld.TERRAIN_GENERATION)
                 .equals(persisted.getProperty("world.terrainGeneration")), "persistent terrain generation");
         check(terrain.fingerprint().equals(persisted.getProperty("world.terrainFingerprint")),
@@ -107,11 +122,11 @@ public final class WorldPersistenceTest {
                 new Messages.ClientUpdate(4, 0, 0, bobDelivery.eventCursor(), 0, List.of(acknowledge)));
         check(acknowledged.commandResults().getFirst().accepted() && acknowledged.deliveries().isEmpty(),
                 "delivery acknowledgment clears durable inbox");
-        Messages.Command marketPeace = new Messages.Command("market-peace-01", "STANCE", "bob-id",
-                "NEUTRAL", 0, 0, "");
+        Messages.Command marketPeace = new Messages.Command("market-peace-01", "SURRENDER_HOUSE_WAR", "",
+                "persistent-war", 0, 0, "");
         World.SyncResult peaceful = reloaded.applyUpdate("alice-id",
                 new Messages.ClientUpdate(5, 1200, 5555, acknowledged.eventCursor(), 0, List.of(marketPeace)));
-        check(peaceful.commandResults().getFirst().accepted(), "war stance cleared before market purchase");
+        check(peaceful.commandResults().getFirst().accepted(), "formal war surrendered before market purchase");
         Messages.Command buyOffer = new Messages.Command("market-buy-0001", "BUY_OFFER", "",
                 "persistent-offer", 10, 0, "");
         World.SyncResult purchased = reloaded.applyUpdate("bob-id",
@@ -157,8 +172,8 @@ public final class WorldPersistenceTest {
         } catch (ProtocolException expected) {
             check("MOD_VERSION_MISMATCH".equals(expected.code()), "mod-version error code");
         }
-        Messages.Hello extraMod = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0|Example Mod@1.0.0", 0, 0, SharedWorld.WORLD_ID, "modded-client",
+        Messages.Hello extraMod = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0|Example Mod@1.0.0", 0, 0, SharedWorld.WORLD_ID, "modded-client",
                 "dddddddddddddddddddddddddddddddd", "Modded Ruler", "Modded Realm", "Modded City", "");
         try {
             reloaded.join(extraMod);
@@ -345,8 +360,8 @@ public final class WorldPersistenceTest {
     private static void verifyFoundingAndProtection(Path worldFile) throws Exception {
         ServerConfig protectedConfig = config(worldFile, 432_000_000L);
         World world = new World(protectedConfig);
-        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0", 0, 0, SharedWorld.WORLD_ID, "blank-player",
+        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "blank-player",
                 "11111111111111111111111111111111", "", "", "", "");
         try {
             world.join(blank);
@@ -360,8 +375,8 @@ public final class WorldPersistenceTest {
                 "First Ruler", "First Capital"));
         check(first.player().protectionEndsEpochMillis > System.currentTimeMillis(),
                 "new kingdom receives beginner protection");
-        Messages.Hello duplicateKingdom = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0", 0, 0, SharedWorld.WORLD_ID, "duplicate-player",
+        Messages.Hello duplicateKingdom = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "duplicate-player",
                 "22222222222222222222222222222222", "Second Ruler", first.player().kingdomName,
                 "Second Capital", "");
         try {
@@ -371,8 +386,8 @@ public final class WorldPersistenceTest {
             check("KINGDOM_NAME_TAKEN".equals(expected.code()), "duplicate-kingdom error code");
             check(world.metrics().registeredPlayers() == 1, "duplicate name consumes no player slot");
         }
-        Messages.Hello unknownPlacement = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0", 0, 0, SharedWorld.WORLD_ID, "unknown-neighbor",
+        Messages.Hello unknownPlacement = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "unknown-neighbor",
                 "44444444444444444444444444444444", "Neighbor Ruler", "Neighbor Realm",
                 "Neighbor Capital", "Missing Realm");
         try {
@@ -385,8 +400,8 @@ public final class WorldPersistenceTest {
 
         World.JoinResult second = world.join(hello("second-player", "22222222222222222222222222222222",
                 "Second Ruler", "Second Capital"));
-        Messages.Hello nearbyHello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0", 0, 0, SharedWorld.WORLD_ID, "nearby-player",
+        Messages.Hello nearbyHello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "nearby-player",
                 "44444444444444444444444444444444", "Nearby Ruler", "Nearby Realm",
                 "Nearby Capital", first.player().kingdomName);
         World.JoinResult nearby = world.join(nearbyHello);
@@ -397,14 +412,19 @@ public final class WorldPersistenceTest {
                 "social placement chooses an immediately nearby buildable coordinate");
         world.leave("nearby-player");
         world.applyUpdate("first-player", new Messages.ClientUpdate(1, 0, 0, 0, 0, List.of(
-                new Messages.Command("protection-war", "STANCE", "second-player", "WAR", 0, 0, ""))));
-        World.SyncResult blocked = world.applyUpdate("first-player", new Messages.ClientUpdate(2, 0, 0, 0, 0, List.of(
+                new Messages.Command("first-house-001", "CREATE_HOUSE", "", "FIR", 0, 0, "First House"))));
+        world.applyUpdate("second-player", new Messages.ClientUpdate(1, 0, 0, 0, 0, List.of(
+                new Messages.Command("second-house-01", "CREATE_HOUSE", "", "SEC", 0, 0, "Second House"))));
+        world.applyUpdate("first-player", new Messages.ClientUpdate(2, 0, 0, 0, 0, List.of(
+                new Messages.Command("protection-war", "DECLARE_HOUSE_WAR", "", "second-house-01", 0, 0, ""))));
+        world.resolveStrategicTime(System.currentTimeMillis() + 13L * 3_600_000L);
+        World.SyncResult blocked = world.applyUpdate("first-player", new Messages.ClientUpdate(3, 0, 0, 0, 0, List.of(
                 new Messages.Command("protected-army", "SEND_ARMY", "second-player", "", 10, 0, ""))));
         check(!blocked.commandResults().getFirst().accepted()
                         && "TARGET_PROTECTED".equals(blocked.commandResults().getFirst().code()),
                 "protected kingdom cannot be attacked");
         second.player().protectionEndsEpochMillis = 0;
-        World.SyncResult launched = world.applyUpdate("first-player", new Messages.ClientUpdate(3, 0, 0, 0, 0, List.of(
+        World.SyncResult launched = world.applyUpdate("first-player", new Messages.ClientUpdate(4, 0, 0, 0, 0, List.of(
                 new Messages.Command("unprotected-army", "SEND_ARMY", "second-player", "", 10, 0, ""))));
         check(launched.commandResults().getFirst().accepted()
                         && launched.playerState().protectionEndsEpochMillis() == 0,
@@ -435,8 +455,8 @@ public final class WorldPersistenceTest {
         }
 
         World migrated = new World(config(worldFile));
-        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0", 0, 0, SharedWorld.WORLD_ID, "legacy-player", token,
+        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, "legacy-player", token,
                 "", "", "", "");
         try {
             migrated.join(blank);
@@ -459,14 +479,14 @@ public final class WorldPersistenceTest {
     static ServerConfig config(Path worldFile, long beginnerProtectionMillis) {
         return ServerConfig.validate(new ServerConfig("127.0.0.1", 0, SharedWorld.WORLD_ID, SharedWorld.WORLD_NAME,
                 worldFile, SharedWorld.WIDTH, SharedWorld.HEIGHT, 8, SharedWorld.WORLD_SEED,
-                "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0",
+                "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0",
                 1000, 1.0, 2048, beginnerProtectionMillis, 5000, 1000));
     }
 
     static Messages.Hello hello(String id, String token, String name, String city) {
-        return new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0", 0, 0, SharedWorld.WORLD_ID, id, token,
+        return new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0", 0, 0, SharedWorld.WORLD_ID, id, token,
                 name, "Realm " + id, city, "");
     }
 

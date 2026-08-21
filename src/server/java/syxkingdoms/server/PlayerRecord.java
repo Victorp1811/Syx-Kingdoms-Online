@@ -24,6 +24,10 @@ final class PlayerRecord {
     int levyProgressMinutes;
     CrestDesign crest;
     long crestRevision;
+    String houseId = "";
+    String houseRole = "";
+    long houseJoinedEpochMillis;
+    long houseEligibleEpochMillis;
 
     PlayerRecord(String playerId, String authHash, int slot, int x, int y) {
         this.playerId = playerId;

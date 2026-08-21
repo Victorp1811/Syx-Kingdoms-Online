@@ -24,6 +24,13 @@ import java.util.Set;
 
 final class World {
     private static final int MAX_RETAINED_EVENTS = 10_000;
+    private static final long HOUSE_REQUEST_MILLIS = 7L * 86_400_000L;
+    private static final long HOUSE_CHANGE_COOLDOWN_MILLIS = 24L * 3_600_000L;
+    private static final long WAR_PREPARATION_MILLIS = 12L * 3_600_000L;
+    private static final long WAR_DURATION_MILLIS = 7L * 86_400_000L;
+    private static final long TRUCE_MILLIS = 72L * 3_600_000L;
+    private static final long SEASON_MILLIS = 30L * 86_400_000L;
+    private static final long TRIBUTE_INTERVAL_MILLIS = 24L * 3_600_000L;
     private static final Set<String> RESERVED_NAMES = Set.of(
             "admin", "administrator", "moderator", "server", "system", "syx kingdoms");
 
@@ -31,7 +38,7 @@ final class World {
     }
 
     record Metrics(int registeredPlayers, int onlinePlayers, int retainedEvents,
-            int armies, int shipments, int deliveries, int marketOffers) {
+            int armies, int shipments, int deliveries, int marketOffers, int houses, int wars) {
     }
 
     record SyncResult(
@@ -42,6 +49,13 @@ final class World {
             List<Messages.WorldEvent> events,
             long crestCursor,
             List<Messages.Crest> crests,
+            List<Messages.House> houses,
+            List<Messages.HouseMember> houseMembers,
+            List<Messages.HouseRequest> houseRequests,
+            List<Messages.Province> provinces,
+            List<Messages.HouseWar> wars,
+            List<Messages.BattleReport> battleReports,
+            Messages.Season season,
             List<Messages.Relation> relations,
             List<Messages.Army> armies,
             List<Messages.Delivery> deliveries,
@@ -63,9 +77,18 @@ final class World {
     private final List<ShipmentRecord> shipments = new ArrayList<>();
     private final List<DeliveryRecord> deliveries = new ArrayList<>();
     private final List<MarketOfferRecord> marketOffers = new ArrayList<>();
+    private final Map<String, HouseRecord> houses = new HashMap<>();
+    private final List<HouseRequestRecord> houseRequests = new ArrayList<>();
+    private final Map<String, ProvinceRecord> provinces = new HashMap<>();
+    private final List<HouseWarRecord> wars = new ArrayList<>();
+    private final List<BattleReportRecord> battleReports = new ArrayList<>();
     private int nextSlot;
     private long nextEventId;
     private long nextCrestRevision;
+    private int seasonNumber;
+    private long seasonStartsEpochMillis;
+    private long seasonEndsEpochMillis;
+    private String seasonWinnerHouseId;
     private boolean dirty;
 
     World(ServerConfig config) throws IOException {
@@ -78,6 +101,10 @@ final class World {
         this.nextSlot = loaded.nextSlot();
         this.nextEventId = loaded.nextEventId();
         this.nextCrestRevision = loaded.nextCrestRevision();
+        this.seasonNumber = loaded.seasonNumber();
+        this.seasonStartsEpochMillis = loaded.seasonStartsEpochMillis();
+        this.seasonEndsEpochMillis = loaded.seasonEndsEpochMillis();
+        this.seasonWinnerHouseId = loaded.seasonWinnerHouseId();
         if (nextCrestRevision < 1) {
             throw new IOException("Persistent next crest revision is invalid");
         }
@@ -149,7 +176,8 @@ final class World {
                     || !players.containsKey(army.targetPlayerId)
                     || army.ownerPlayerId.equals(army.targetPlayerId)
                     || army.troops < 1 || army.troops > 10_000
-                    || army.departedEpochMillis < 0 || army.arrivesEpochMillis < army.departedEpochMillis) {
+                    || army.departedEpochMillis < 0 || army.arrivesEpochMillis < army.departedEpochMillis
+                    || (!"ATTACK".equals(army.mission) && !"REINFORCE".equals(army.mission))) {
                 throw new IOException("Invalid persistent army: " + army.armyId);
             }
             armies.add(army);
@@ -176,6 +204,101 @@ final class World {
                 throw new IOException("Invalid persistent market offer: " + offer.offerId);
             }
             marketOffers.add(offer);
+        }
+        Set<String> houseNames = new HashSet<>();
+        Set<String> houseTags = new HashSet<>();
+        for (HouseRecord house : loaded.houses()) {
+            try {
+                if (houses.put(house.houseId, house) != null || !house.houseId.matches("[A-Za-z0-9-]{8,64}")
+                        || !houseNames.add(nameKey(houseName(house.name)))
+                        || !houseTags.add(houseTag(house.tag))
+                        || house.seasonPoints < 0
+                        || (house.crest == null) != (house.crestRevision == 0)
+                        || house.crestRevision < 0 || house.crestRevision >= nextCrestRevision
+                        || (house.crestRevision > 0 && !crestRevisions.add(house.crestRevision))) {
+                    throw new IOException("Invalid or duplicate House: " + house.houseId);
+                }
+            } catch (ProtocolException e) {
+                throw new IOException("Invalid House profile: " + house.houseId, e);
+            }
+        }
+        for (PlayerRecord player : players.values()) {
+            if (!player.houseId.isBlank()) {
+                HouseRecord house = houses.get(player.houseId);
+                if (house == null || !validHouseRole(player.houseRole)) {
+                    throw new IOException("Invalid House membership for " + player.playerId);
+                }
+            } else if (!player.houseRole.isBlank()) {
+                throw new IOException("House role without membership for " + player.playerId);
+            }
+        }
+        for (HouseRecord house : houses.values()) {
+            PlayerRecord sovereign = players.get(house.sovereignPlayerId);
+            if (sovereign == null || !house.houseId.equals(sovereign.houseId)
+                    || !"SOVEREIGN".equals(sovereign.houseRole)) {
+                throw new IOException("House has no valid sovereign: " + house.houseId);
+            }
+            if (houseMemberCount(house.houseId) > HouseRecord.MAX_MEMBERS) {
+                throw new IOException("House exceeds its 20-member capacity: " + house.houseId);
+            }
+        }
+        Set<String> requestIds = new HashSet<>();
+        for (HouseRequestRecord request : loaded.houseRequests()) {
+            if (!requestIds.add(request.requestId) || !houses.containsKey(request.houseId)
+                    || !players.containsKey(request.playerId)
+                    || (!"INVITE".equals(request.type) && !"APPLICATION".equals(request.type))
+                    || request.createdEpochMillis < 0 || request.expiresEpochMillis < request.createdEpochMillis) {
+                throw new IOException("Invalid persistent House request: " + request.requestId);
+            }
+            houseRequests.add(request);
+        }
+        if (loaded.provinces().isEmpty()) {
+            for (int y = 0; y < SharedWorld.LINEAR_SCALE; y++) {
+                for (int x = 0; x < SharedWorld.LINEAR_SCALE; x++) {
+                    provinces.put(provinceKey(x, y), new ProvinceRecord(x, y));
+                }
+            }
+        } else {
+            for (ProvinceRecord province : loaded.provinces()) {
+                if (province.x < 0 || province.x >= SharedWorld.LINEAR_SCALE
+                        || province.y < 0 || province.y >= SharedWorld.LINEAR_SCALE
+                        || provinces.put(provinceKey(province.x, province.y), province) != null
+                        || (!province.ownerHouseId.isBlank() && !houses.containsKey(province.ownerHouseId))
+                        || (!province.occupierHouseId.isBlank() && !houses.containsKey(province.occupierHouseId))) {
+                    throw new IOException("Invalid persistent province " + province.x + "," + province.y);
+                }
+            }
+            if (provinces.size() != SharedWorld.SECTOR_COUNT) {
+                throw new IOException("Persistent world must contain exactly " + SharedWorld.SECTOR_COUNT + " provinces");
+            }
+        }
+        Set<String> warIds = new HashSet<>();
+        for (HouseWarRecord war : loaded.wars()) {
+            if (!houses.containsKey(war.attackerHouseId) || !houses.containsKey(war.defenderHouseId)
+                    || war.attackerHouseId.equals(war.defenderHouseId) || !validWarPhase(war.phase)
+                    || !warIds.add(war.warId)) {
+                throw new IOException("Invalid persistent House war " + war.warId);
+            }
+            wars.add(war);
+        }
+        for (ArmyRecord army : armies) {
+            if (("ATTACK".equals(army.mission) && !army.warId.isBlank() && !warIds.contains(army.warId))
+                    || ("REINFORCE".equals(army.mission) && !army.warId.isBlank())) {
+                throw new IOException("Persistent army has an invalid war binding: " + army.armyId);
+            }
+        }
+        Set<String> reportIds = new HashSet<>();
+        for (BattleReportRecord report : loaded.reports()) {
+            if (!reportIds.add(report.reportId) || !players.containsKey(report.attackerPlayerId)
+                    || !players.containsKey(report.defenderPlayerId)
+                    || report.provinceX < 0 || report.provinceX >= SharedWorld.LINEAR_SCALE
+                    || report.provinceY < 0 || report.provinceY >= SharedWorld.LINEAR_SCALE) {
+                throw new IOException("Invalid persistent battle report: " + report.reportId);
+            }
+            battleReports.add(report);
+        }
+        if (seasonNumber < 1 || seasonStartsEpochMillis < 0 || seasonEndsEpochMillis <= seasonStartsEpochMillis) {
+            throw new IOException("Invalid persistent season state");
         }
     }
 
@@ -302,6 +425,7 @@ final class World {
             throw new ProtocolException("ACCOUNT_BANNED", "This player identity is banned from the persistent world");
         }
         heartbeat(playerId, new Messages.Heartbeat(update.sequence(), update.population(), update.credits()));
+        resolveStrategicTime(System.currentTimeMillis());
         List<Messages.CommandResult> results = applyCommands(playerId, update.commands());
         SyncResult result = sync(playerId, update.lastEventId(), update.lastCrestRevision(), results);
         if (!update.commands().isEmpty()) {
@@ -336,7 +460,7 @@ final class World {
 
     synchronized Metrics metrics() {
         return new Metrics(players.size(), online.size(), events.size(), armies.size(),
-                shipments.size(), deliveries.size(), marketOffers.size());
+                shipments.size(), deliveries.size(), marketOffers.size(), houses.size(), wars.size());
     }
 
     synchronized void saveIfDirty() throws IOException {
@@ -345,14 +469,20 @@ final class World {
         }
         WorldStore.save(config.worldFile(), config, epochMillis, nextSlot, new ArrayList<>(players.values()),
                 nextEventId, nextCrestRevision, new ArrayList<>(events), new ArrayList<>(armies),
-                new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers));
+                new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers),
+                new ArrayList<>(houses.values()), new ArrayList<>(houseRequests),
+                orderedProvinces(), new ArrayList<>(wars), new ArrayList<>(battleReports),
+                seasonNumber, seasonStartsEpochMillis, seasonEndsEpochMillis, seasonWinnerHouseId);
         dirty = false;
     }
 
     synchronized void save() throws IOException {
         WorldStore.save(config.worldFile(), config, epochMillis, nextSlot, new ArrayList<>(players.values()),
                 nextEventId, nextCrestRevision, new ArrayList<>(events), new ArrayList<>(armies),
-                new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers));
+                new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers),
+                new ArrayList<>(houses.values()), new ArrayList<>(houseRequests),
+                orderedProvinces(), new ArrayList<>(wars), new ArrayList<>(battleReports),
+                seasonNumber, seasonStartsEpochMillis, seasonEndsEpochMillis, seasonWinnerHouseId);
         dirty = false;
     }
 
@@ -361,10 +491,13 @@ final class World {
     }
 
     synchronized void maintenance() {
-        resolveArmies(System.currentTimeMillis());
+        long now = System.currentTimeMillis();
+        resolveStrategicTime(now);
+        resolveArmies(now);
     }
 
     synchronized void resolveArmies(long now) {
+        resolveStrategicTime(now);
         updateEconomy(now);
         var iterator = armies.iterator();
         while (iterator.hasNext()) {
@@ -374,6 +507,38 @@ final class World {
             }
             PlayerRecord attacker = players.get(army.ownerPlayerId);
             PlayerRecord defender = players.get(army.targetPlayerId);
+            if (attacker == null || defender == null) {
+                iterator.remove();
+                dirty = true;
+                continue;
+            }
+            if ("REINFORCE".equals(army.mission)) {
+                int received = Math.min(army.troops, 10_000 - defender.levies);
+                defender.levies += received;
+                int returned = army.troops - received;
+                if (returned > 0) {
+                    attacker.levies = Math.min(10_000, attacker.levies + returned);
+                }
+                int px = SharedWorld.sectorX(defender.x);
+                int py = SharedWorld.sectorY(defender.y);
+                addReport(new BattleReportRecord(army.armyId, now, attacker.playerId,
+                        defender.playerId, "", "REINFORCED", army.troops, defender.levies,
+                        received, defender.levies, 0, px, py, 0));
+                appendSystemEvent("REINFORCEMENT_ARRIVED", attacker, defender.playerId,
+                        "", "", received, 0);
+                iterator.remove();
+                dirty = true;
+                continue;
+            }
+            HouseWarRecord war = activeWar(attacker.houseId, defender.houseId, now);
+            if (war == null || !war.warId.equals(army.warId)) {
+                attacker.levies = Math.min(10_000, attacker.levies + army.troops);
+                appendSystemEvent("ARMY_RETURNED", attacker, defender.playerId,
+                        "War ended before arrival", "", army.troops, 0);
+                iterator.remove();
+                dirty = true;
+                continue;
+            }
             int defendingLevies = Math.min(defender.levies, army.troops);
             int attackerSurvivors = Math.max(0, army.troops - defendingLevies);
             int defenderSurvivors = Math.max(0, defender.levies - army.troops);
@@ -381,14 +546,35 @@ final class World {
             long stolenCrowns = 0;
             String outcome;
             if (attackerSurvivors > 0) {
-                stolenCrowns = Math.min(Math.min(defender.crowns, attackerSurvivors * 5L),
+                long dailyCap = Math.min(50_000L, Math.max(100L, defender.crowns / 10L));
+                long alreadyLooted = lootAgainstToday(attacker.playerId, defender.playerId, now);
+                long remainingCap = Math.max(0, dailyCap - alreadyLooted);
+                stolenCrowns = Math.min(Math.min(Math.min(defender.crowns, attackerSurvivors * 5L), remainingCap),
                         1_000_000_000L - attacker.crowns);
                 defender.crowns -= stolenCrowns;
                 attacker.crowns += stolenCrowns;
+                attacker.levies = Math.min(10_000, attacker.levies + attackerSurvivors);
                 outcome = "ATTACKER_WIN";
             } else {
                 outcome = "DEFENDER_WIN";
             }
+            int provinceX = SharedWorld.sectorX(defender.x);
+            int provinceY = SharedWorld.sectorY(defender.y);
+            boolean farmLimited = attacksAgainstToday(attacker.playerId, defender.playerId, now) >= 3;
+            int score = farmLimited ? 0 : attackerSurvivors > 0 ? Math.max(1, Math.min(25, attackerSurvivors / 20 + 1))
+                    : Math.max(1, Math.min(15, defenderSurvivors / 25 + 1));
+            if (attackerSurvivors > 0) {
+                awardWarScore(war, attacker.houseId, score);
+                if (!farmLimited) {
+                    applyOccupation(war, attacker.houseId, defender.houseId, provinceX, provinceY,
+                            Math.max(10, Math.min(40, score * 2)), now);
+                }
+            } else {
+                awardWarScore(war, defender.houseId, score);
+            }
+            addReport(new BattleReportRecord(army.armyId, now, attacker.playerId, defender.playerId,
+                    war.warId, outcome, army.troops, defendingLevies, attackerSurvivors,
+                    defenderSurvivors, stolenCrowns, provinceX, provinceY, score));
             appendSystemEvent("BATTLE", attacker, defender.playerId, outcome,
                     Integer.toString(defenderSurvivors), attackerSurvivors, stolenCrowns);
             iterator.remove();
@@ -451,11 +637,19 @@ final class World {
         return new SyncResult(snapshot(), new Messages.PlayerState(
                 player.crowns, player.levies, player.protectionEndsEpochMillis),
                 List.copyOf(results), cursor, List.copyOf(visibleEvents), crestCursor,
-                List.copyOf(visibleCrests), relationsFor(playerId),
-                armies.stream().map(ArmyRecord::message).toList(), deliveriesFor(playerId), marketOffers());
+                List.copyOf(visibleCrests), houseMessages(), houseMemberMessages(),
+                houseRequestMessages(player), provinceMessages(), warMessages(), reportsFor(player),
+                new Messages.Season(seasonNumber, seasonStartsEpochMillis, seasonEndsEpochMillis,
+                        seasonWinnerHouseId, System.currentTimeMillis() < seasonEndsEpochMillis ? "ACTIVE" : "COMPLETE"),
+                relationsFor(playerId), armiesFor(player), deliveriesFor(playerId), marketOffers());
     }
 
     private boolean eventVisibleTo(WorldEventRecord event, String playerId) {
+        if ("HOUSE_CHAT".equals(event.type)) {
+            PlayerRecord listener = players.get(playerId);
+            return listener != null && !listener.houseId.isBlank()
+                    && listener.houseId.equals(event.argument);
+        }
         if (!"LOCAL_CHAT".equals(event.type)) {
             return event.visibleTo(playerId);
         }
@@ -495,7 +689,8 @@ final class World {
     private Messages.CommandResult executeCommand(String playerId, Messages.Command command) throws ProtocolException {
         PlayerRecord actor = requireOnlinePlayer(playerId);
         if (("CHAT".equals(command.type()) || "LOCAL_CHAT".equals(command.type())
-                || "MAIL".equals(command.type())) && muted(actor.playerId)) {
+                || "MAIL".equals(command.type()) || "HOUSE_CHAT".equals(command.type()))
+                && muted(actor.playerId)) {
             throw new ProtocolException("ACCOUNT_MUTED", "This player identity is muted from chat and mail");
         }
         return switch (command.type()) {
@@ -535,9 +730,304 @@ final class World {
                 appendEvent(command, "MAIL", actor, target.playerId, text, "", 0, 0);
                 yield accepted(command, "MAIL_SENT", "Private mail sent to " + target.playerName);
             }
+            case "CREATE_HOUSE" -> {
+                requireBlankTarget(command);
+                if (!actor.houseId.isBlank()) {
+                    throw new ProtocolException("ALREADY_IN_HOUSE", "Leave the current House before creating another");
+                }
+                long now = System.currentTimeMillis();
+                if (actor.houseEligibleEpochMillis > now) {
+                    throw new ProtocolException("HOUSE_COOLDOWN", "House membership changes are on cooldown until "
+                            + actor.houseEligibleEpochMillis);
+                }
+                if (houses.size() >= syxkingdoms.protocol.Protocol.MAX_HOUSES_PER_SYNC) {
+                    throw new ProtocolException("HOUSE_LIMIT", "The world has reached its House capacity");
+                }
+                String name = houseName(command.text());
+                String tag = houseTag(command.argument());
+                ensureHouseNameAvailable(name, tag);
+                HouseRecord house = new HouseRecord(command.commandId(), name, tag, actor.playerId, now);
+                houses.put(house.houseId, house);
+                joinHouse(actor, house, "SOVEREIGN", now);
+                ProvinceRecord home = province(SharedWorld.sectorX(actor.x), SharedWorld.sectorY(actor.y));
+                if (home.ownerHouseId.isBlank()) {
+                    home.ownerHouseId = house.houseId;
+                    house.capitalProvinceX = home.x;
+                    house.capitalProvinceY = home.y;
+                }
+                appendEvent(command, "HOUSE_CREATED", actor, "", name, tag, home.x, home.y);
+                yield accepted(command, "HOUSE_CREATED", "House " + name + " [" + tag + "] founded");
+            }
+            case "APPLY_HOUSE" -> {
+                requireBlankTarget(command);
+                requireNoHouse(actor);
+                HouseRecord house = house(command.argument());
+                long now = System.currentTimeMillis();
+                requireHouseEligible(actor, now);
+                requireHouseCapacity(house);
+                HouseRequestRecord request = createHouseRequest(command.commandId(), house.houseId,
+                        actor.playerId, "APPLICATION", now);
+                houseRequests.add(request);
+                appendEvent(command, "HOUSE_APPLICATION", actor, "", house.name, house.houseId, 0, 0);
+                yield accepted(command, "HOUSE_APPLICATION", "Application sent to " + house.name);
+            }
+            case "INVITE_HOUSE" -> {
+                HouseRecord house = requireHouseOfficer(actor, false);
+                PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
+                requireNoHouse(target);
+                requireHouseEligible(target, System.currentTimeMillis());
+                requireHouseCapacity(house);
+                long now = System.currentTimeMillis();
+                HouseRequestRecord request = createHouseRequest(command.commandId(), house.houseId,
+                        target.playerId, "INVITE", now);
+                houseRequests.add(request);
+                appendEvent(command, "HOUSE_INVITE", actor, target.playerId, house.name, house.houseId, 0, 0);
+                yield accepted(command, "HOUSE_INVITE", "Invitation sent to " + target.playerName);
+            }
+            case "ACCEPT_HOUSE_REQUEST" -> {
+                requireBlankTarget(command);
+                HouseRequestRecord request = houseRequest(command.argument());
+                HouseRecord house = house(request.houseId);
+                PlayerRecord applicant = players.get(request.playerId);
+                long now = System.currentTimeMillis();
+                if ("INVITE".equals(request.type)) {
+                    if (!actor.playerId.equals(applicant.playerId)) {
+                        throw new ProtocolException("NOT_REQUEST_RECIPIENT", "Only the invited player can accept this request");
+                    }
+                } else {
+                    HouseRecord actorHouse = requireHouseOfficer(actor, false);
+                    if (!actorHouse.houseId.equals(house.houseId)) {
+                        throw new ProtocolException("HOUSE_PERMISSION", "Only an officer of this House can accept the application");
+                    }
+                }
+                requireNoHouse(applicant);
+                requireHouseEligible(applicant, now);
+                requireHouseCapacity(house);
+                joinHouse(applicant, house, "MEMBER", now);
+                houseRequests.removeIf(item -> item.playerId.equals(applicant.playerId));
+                appendEvent(command, "HOUSE_JOINED", actor, applicant.playerId, house.name,
+                        applicant.playerName, 0, 0);
+                yield accepted(command, "HOUSE_JOINED", applicant.playerName + " joined " + house.name);
+            }
+            case "REJECT_HOUSE_REQUEST" -> {
+                requireBlankTarget(command);
+                HouseRequestRecord request = houseRequest(command.argument());
+                if ("INVITE".equals(request.type)) {
+                    if (!actor.playerId.equals(request.playerId)
+                            && !house(request.houseId).houseId.equals(requireHouseOfficer(actor, false).houseId)) {
+                        throw new ProtocolException("HOUSE_PERMISSION", "This request is not yours to reject");
+                    }
+                } else if (!house(request.houseId).houseId.equals(requireHouseOfficer(actor, false).houseId)
+                        && !actor.playerId.equals(request.playerId)) {
+                    throw new ProtocolException("HOUSE_PERMISSION", "This request is not yours to reject");
+                }
+                houseRequests.remove(request);
+                appendEvent(command, "HOUSE_REQUEST_REJECTED", actor, request.playerId,
+                        request.type, request.houseId, 0, 0);
+                yield accepted(command, "HOUSE_REQUEST_REJECTED", "House request rejected");
+            }
+            case "LEAVE_HOUSE" -> {
+                requireBlankTarget(command);
+                HouseRecord house = requireHouse(actor);
+                if ("SOVEREIGN".equals(actor.houseRole) && houseMemberCount(house.houseId) > 1) {
+                    throw new ProtocolException("TRANSFER_LEADERSHIP", "Transfer the Sovereign role before leaving");
+                }
+                removeFromHouse(actor, house, System.currentTimeMillis());
+                appendEvent(command, "HOUSE_LEFT", actor, "", house.name, house.houseId, 0, 0);
+                yield accepted(command, "HOUSE_LEFT", "Left " + house.name);
+            }
+            case "KICK_HOUSE" -> {
+                HouseRecord house = requireHouseOfficer(actor, true);
+                PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
+                if (!house.houseId.equals(target.houseId) || "SOVEREIGN".equals(target.houseRole)) {
+                    throw new ProtocolException("HOUSE_PERMISSION", "That player cannot be removed by this role");
+                }
+                if (!canManageRole(actor.houseRole, target.houseRole)) {
+                    throw new ProtocolException("HOUSE_PERMISSION", "You cannot remove an equal or higher House role");
+                }
+                removeFromHouse(target, house, System.currentTimeMillis());
+                appendEvent(command, "HOUSE_KICKED", actor, target.playerId, house.name, "", 0, 0);
+                yield accepted(command, "HOUSE_KICKED", target.playerName + " removed from " + house.name);
+            }
+            case "SET_HOUSE_ROLE" -> {
+                HouseRecord house = requireHouse(actor);
+                if (!"SOVEREIGN".equals(actor.houseRole)) {
+                    throw new ProtocolException("HOUSE_PERMISSION", "Only the Sovereign can assign House roles");
+                }
+                PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
+                if (!house.houseId.equals(target.houseId)) {
+                    throw new ProtocolException("HOUSE_PERMISSION", "Target is not a member of your House");
+                }
+                String role = normalizeHouseRole(command.argument());
+                if ("SOVEREIGN".equals(role)) {
+                    actor.houseRole = "MARSHAL";
+                    target.houseRole = "SOVEREIGN";
+                    house.sovereignPlayerId = target.playerId;
+                } else {
+                    target.houseRole = role;
+                }
+                appendEvent(command, "HOUSE_ROLE", actor, target.playerId, role, house.houseId, 0, 0);
+                yield accepted(command, "HOUSE_ROLE", target.playerName + " is now " + role);
+            }
+            case "HOUSE_ANNOUNCEMENT" -> {
+                requireBlankTarget(command);
+                HouseRecord house = requireHouseOfficer(actor, false);
+                house.announcement = socialText(command.text(), "House announcement");
+                appendEvent(command, "HOUSE_ANNOUNCEMENT", actor, "", house.announcement,
+                        house.houseId, 0, 0);
+                yield accepted(command, "HOUSE_ANNOUNCEMENT", "House announcement updated");
+            }
+            case "HOUSE_CHAT" -> {
+                requireBlankTarget(command);
+                HouseRecord house = requireHouse(actor);
+                String text = socialText(command.text(), "House chat message");
+                appendEvent(command, "HOUSE_CHAT", actor, "", text, house.houseId, 0, 0);
+                yield accepted(command, "HOUSE_MESSAGE_SENT", "House message sent");
+            }
+            case "SET_HOUSE_CREST" -> {
+                requireBlankTarget(command);
+                HouseRecord house = requireHouse(actor);
+                if (!"SOVEREIGN".equals(actor.houseRole) && !"HERALD".equals(actor.houseRole)) {
+                    throw new ProtocolException("HOUSE_PERMISSION", "Only the Sovereign or Herald can edit the House crest");
+                }
+                CrestDesign crest = CrestDesign.decode(command.argument(), command.text());
+                if (!crest.hasVisiblePixels()) {
+                    throw new ProtocolException("BAD_CREST", "A House crest must contain a visible pixel");
+                }
+                house.crest = crest;
+                house.crestRevision = nextCrestRevision++;
+                appendEvent(command, "HOUSE_CREST_UPDATED", actor, "", house.name,
+                        house.houseId, house.crestRevision, 0);
+                yield accepted(command, "HOUSE_CREST_UPDATED", "House crest synchronized");
+            }
+            case "DECLARE_HOUSE_WAR" -> {
+                requireBlankTarget(command);
+                HouseRecord attackerHouse = requireHouseWarOfficer(actor);
+                HouseRecord defenderHouse = house(command.argument());
+                if (attackerHouse.houseId.equals(defenderHouse.houseId)) {
+                    throw new ProtocolException("BAD_WAR", "A House cannot declare war on itself");
+                }
+                long now = System.currentTimeMillis();
+                if (warBetween(attackerHouse.houseId, defenderHouse.houseId, now) != null) {
+                    throw new ProtocolException("WAR_EXISTS", "These Houses already have a war or active truce");
+                }
+                wars.removeIf(war -> "ENDED".equals(war.phase));
+                if (wars.size() >= syxkingdoms.protocol.Protocol.MAX_WARS_PER_SYNC) {
+                    throw new ProtocolException("WAR_LIMIT", "The persistent world war capacity is full");
+                }
+                HouseWarRecord war = new HouseWarRecord(command.commandId(), attackerHouse.houseId,
+                        defenderHouse.houseId, now, now + WAR_PREPARATION_MILLIS,
+                        now + WAR_PREPARATION_MILLIS + WAR_DURATION_MILLIS, "PREPARING");
+                wars.add(war);
+                appendEvent(command, "WAR_DECLARED", actor, defenderHouse.sovereignPlayerId,
+                        attackerHouse.name, defenderHouse.name, war.startsEpochMillis, war.endsEpochMillis);
+                yield accepted(command, "WAR_DECLARED", "War preparation started; fighting begins in 12 hours");
+            }
+            case "SURRENDER_HOUSE_WAR" -> {
+                requireBlankTarget(command);
+                HouseRecord surrendering = requireHouseWarOfficer(actor);
+                HouseWarRecord war = war(command.argument());
+                if (!war.involves(surrendering.houseId) || !("ACTIVE".equals(war.phase) || "PREPARING".equals(war.phase))) {
+                    throw new ProtocolException("BAD_WAR", "This House cannot surrender that war");
+                }
+                endWar(war, surrendering.houseId, System.currentTimeMillis());
+                appendEvent(command, "WAR_SURRENDERED", actor, "", surrendering.name,
+                        war.warId, war.attackerScore, war.defenderScore);
+                yield accepted(command, "WAR_SURRENDERED", surrendering.name + " surrendered; 72-hour truce active");
+            }
+            case "CLAIM_PROVINCE" -> {
+                requireBlankTarget(command);
+                HouseRecord house = requireHouseWarOfficer(actor);
+                int x = coordinate(command.value1(), "province x");
+                int y = coordinate(command.value2(), "province y");
+                ProvinceRecord province = province(x, y);
+                if (!province.ownerHouseId.isBlank()) {
+                    throw new ProtocolException("PROVINCE_OWNED", "This province already has an owner");
+                }
+                if (!canClaimProvince(house, actor, x, y)) {
+                    throw new ProtocolException("PROVINCE_NOT_ADJACENT", "Claim must touch House territory or contain your capital city");
+                }
+                province.ownerHouseId = house.houseId;
+                if (house.capitalProvinceX < 0) {
+                    house.capitalProvinceX = x;
+                    house.capitalProvinceY = y;
+                }
+                house.seasonPoints += 25;
+                appendEvent(command, "PROVINCE_CLAIMED", actor, "", house.name, house.houseId, x, y);
+                yield accepted(command, "PROVINCE_CLAIMED", "Province " + x + "," + y + " claimed");
+            }
+            case "ANNEX_PROVINCE" -> {
+                requireBlankTarget(command);
+                HouseRecord house = requireHouseWarOfficer(actor);
+                int x = coordinate(command.value1(), "province x");
+                int y = coordinate(command.value2(), "province y");
+                ProvinceRecord province = province(x, y);
+                if (province.ownerHouseId.isBlank() || province.ownerHouseId.equals(house.houseId)
+                        || !house.houseId.equals(province.occupierHouseId)
+                        || province.occupationInfluence < 100) {
+                    throw new ProtocolException("ANNEXATION_NOT_READY", "Province requires 100% occupation influence against an enemy owner");
+                }
+                HouseRecord defenderHouse = house(province.ownerHouseId);
+                HouseWarRecord war = activeWar(house.houseId, defenderHouse.houseId, System.currentTimeMillis());
+                if (war == null) {
+                    throw new ProtocolException("NOT_AT_WAR", "Annexation requires an active formal House war");
+                }
+                if (!canClaimProvince(house, actor, x, y)) {
+                    throw new ProtocolException("PROVINCE_NOT_ADJACENT", "Annexed territory must touch your House territory");
+                }
+                if (defenderHouse.capitalProvinceX == x && defenderHouse.capitalProvinceY == y
+                        && ownedProvinceCount(defenderHouse.houseId) > 1) {
+                    throw new ProtocolException("CAPITAL_LAST", "A House capital can only be annexed after its other provinces");
+                }
+                province.ownerHouseId = house.houseId;
+                province.occupierHouseId = "";
+                province.occupationInfluence = 0;
+                province.blockadeEndsEpochMillis = 0;
+                province.tributeCrowns = 0;
+                house.seasonPoints += 100;
+                awardWarScore(war, house.houseId, 100);
+                if (house.capitalProvinceX < 0) {
+                    house.capitalProvinceX = x;
+                    house.capitalProvinceY = y;
+                }
+                if (defenderHouse.capitalProvinceX == x && defenderHouse.capitalProvinceY == y) {
+                    defenderHouse.capitalProvinceX = -1;
+                    defenderHouse.capitalProvinceY = -1;
+                }
+                appendEvent(command, "PROVINCE_ANNEXED", actor, defenderHouse.sovereignPlayerId,
+                        house.name, defenderHouse.name, x, y);
+                yield accepted(command, "PROVINCE_ANNEXED", "Province " + x + "," + y + " annexed");
+            }
+            case "COLLECT_TRIBUTE" -> {
+                requireBlankTarget(command);
+                HouseRecord house = requireHouse(actor);
+                int x = coordinate(command.value1(), "province x");
+                int y = coordinate(command.value2(), "province y");
+                ProvinceRecord province = province(x, y);
+                if (!house.houseId.equals(province.occupierHouseId)
+                        || province.occupationInfluence < 100) {
+                    throw new ProtocolException("NOT_OCCUPIER", "Your House does not fully occupy this province");
+                }
+                long now = System.currentTimeMillis();
+                if (province.lastTributeEpochMillis + TRIBUTE_INTERVAL_MILLIS > now) {
+                    throw new ProtocolException("TRIBUTE_COOLDOWN", "Tribute can be collected once per day");
+                }
+                long amount = Math.min(province.tributeCrowns, 10_000L);
+                if (amount < 1) {
+                    throw new ProtocolException("NO_TRIBUTE", "No tribute is ready in this province");
+                }
+                actor.crowns = Math.min(1_000_000_000L, actor.crowns + amount);
+                province.tributeCrowns -= amount;
+                province.lastTributeEpochMillis = now;
+                appendEvent(command, "TRIBUTE_COLLECTED", actor, "", house.name, house.houseId, amount, x * 100L + y);
+                yield accepted(command, "TRIBUTE_COLLECTED", amount + " crowns of tribute collected");
+            }
             case "STANCE" -> {
                 PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
                 String stance = normalizeStance(command.argument());
+                if ("WAR".equals(stance)) {
+                    throw new ProtocolException("FORMAL_WAR_REQUIRED", "War requires a House declaration and 12-hour preparation phase");
+                }
                 appendEvent(command, "STANCE", actor, target.playerId, "", stance, 0, 0);
                 yield accepted(command, "STANCE_RECORDED", "Stance toward " + target.playerName + " set to " + stance);
             }
@@ -563,8 +1053,9 @@ final class World {
                             target.kingdomName + " is under beginner protection until "
                                     + target.protectionEndsEpochMillis);
                 }
-                if (!"WAR".equals(effectiveStance(actor.playerId, target.playerId))) {
-                    throw new ProtocolException("NOT_AT_WAR", "Armies can only target a city with an effective WAR stance");
+                HouseWarRecord activeWar = activeWar(actor.houseId, target.houseId, now);
+                if (activeWar == null) {
+                    throw new ProtocolException("NOT_AT_WAR", "Armies require an active formal House war");
                 }
                 if (command.value1() < 1 || command.value1() > 10_000) {
                     throw new ProtocolException("BAD_ARMY_SIZE", "Army size must be between 1 and 10000");
@@ -589,9 +1080,26 @@ final class World {
                 }
                 actor.levies -= troops;
                 armies.add(new ArmyRecord(command.commandId(), actor.playerId, target.playerId,
-                        troops, departed, arrives));
+                        troops, departed, arrives, "ATTACK", activeWar.warId));
                 appendEvent(command, "ARMY_SENT", actor, target.playerId, "", "EN_ROUTE", troops, arrives);
                 yield accepted(command, "ARMY_SENT", troops + " levies are marching toward " + target.playerName);
+            }
+            case "SEND_REINFORCEMENT" -> {
+                PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
+                if (actor.houseId.isBlank() || !actor.houseId.equals(target.houseId)) {
+                    throw new ProtocolException("NOT_HOUSE_ALLY", "Reinforcements may only be sent to a House member");
+                }
+                if (command.value1() < 1 || command.value1() > actor.levies) {
+                    throw new ProtocolException("INSUFFICIENT_LEVIES", "Reinforcement size exceeds available levies");
+                }
+                int troops = (int) command.value1();
+                long departed = System.currentTimeMillis();
+                long arrives = departed + travelMillis(actor, target);
+                actor.levies -= troops;
+                armies.add(new ArmyRecord(command.commandId(), actor.playerId, target.playerId,
+                        troops, departed, arrives, "REINFORCE", ""));
+                appendEvent(command, "REINFORCEMENT_SENT", actor, target.playerId, "", "", troops, arrives);
+                yield accepted(command, "REINFORCEMENT_SENT", troops + " levies sent to reinforce " + target.playerName);
             }
             case "SEND_RESOURCE" -> {
                 PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
@@ -758,8 +1266,7 @@ final class World {
             }
             String your = stance(playerId, other.playerId);
             String their = stance(other.playerId, playerId);
-            String effective = "WAR".equals(your) || "WAR".equals(their)
-                    ? "WAR" : ("ALLY".equals(your) && "ALLY".equals(their) ? "ALLY" : "NEUTRAL");
+            String effective = effectiveStance(playerId, other.playerId);
             relations.add(new Messages.Relation(other.playerId, other.playerName, your, their, effective));
         }
         return List.copyOf(relations);
@@ -771,6 +1278,425 @@ final class World {
 
     private static String stanceKey(String actor, String target) {
         return actor + '\u0000' + target;
+    }
+
+    private List<Messages.House> houseMessages() {
+        return houses.values().stream().sorted(Comparator.comparing(house -> house.name))
+                .map(house -> new Messages.House(house.houseId, house.name, house.tag,
+                        house.sovereignPlayerId, house.announcement, houseMemberCount(house.houseId),
+                        house.capitalProvinceX, house.capitalProvinceY, house.seasonPoints,
+                        house.crest == null ? "" : house.crest.hash(),
+                        house.crest == null ? "" : house.crest.pixelsEncoded(),
+                        house.crest == null ? "" : house.crest.paletteHex()))
+                .toList();
+    }
+
+    private List<Messages.HouseMember> houseMemberMessages() {
+        return players.values().stream().filter(player -> !player.houseId.isBlank())
+                .sorted(Comparator.comparingInt(player -> player.slot))
+                .map(player -> new Messages.HouseMember(player.playerId, player.houseId,
+                        player.houseRole, player.houseJoinedEpochMillis)).toList();
+    }
+
+    private List<Messages.HouseRequest> houseRequestMessages(PlayerRecord listener) {
+        long now = System.currentTimeMillis();
+        return houseRequests.stream().filter(request -> request.expiresEpochMillis > now)
+                .filter(request -> request.playerId.equals(listener.playerId)
+                        || (!listener.houseId.isBlank() && request.houseId.equals(listener.houseId)
+                        && isOfficer(listener.houseRole)))
+                .limit(syxkingdoms.protocol.Protocol.MAX_HOUSE_REQUESTS_PER_SYNC)
+                .map(request -> new Messages.HouseRequest(request.requestId, request.houseId,
+                        request.playerId, request.type, request.createdEpochMillis, request.expiresEpochMillis))
+                .toList();
+    }
+
+    private List<Messages.Province> provinceMessages() {
+        return orderedProvinces().stream().map(province -> new Messages.Province(province.x,
+                province.y, province.ownerHouseId, province.occupierHouseId,
+                province.occupationInfluence, province.blockadeEndsEpochMillis,
+                province.tributeCrowns)).toList();
+    }
+
+    private List<Messages.HouseWar> warMessages() {
+        return wars.stream().filter(war -> !"ENDED".equals(war.phase))
+                .map(war -> new Messages.HouseWar(war.warId, war.attackerHouseId,
+                        war.defenderHouseId, war.phase, war.declaredEpochMillis,
+                        war.startsEpochMillis, war.endsEpochMillis, war.attackerScore,
+                        war.defenderScore, war.truceEndsEpochMillis, war.surrenderedHouseId))
+                .toList();
+    }
+
+    private List<Messages.BattleReport> reportsFor(PlayerRecord listener) {
+        return battleReports.stream().filter(report -> reportVisibleTo(report, listener))
+                .sorted(Comparator.comparingLong((BattleReportRecord report) -> report.epochMillis).reversed())
+                .limit(syxkingdoms.protocol.Protocol.MAX_REPORTS_PER_SYNC)
+                .map(BattleReportRecord::message).toList();
+    }
+
+    private boolean reportVisibleTo(BattleReportRecord report, PlayerRecord listener) {
+        if (report.attackerPlayerId.equals(listener.playerId) || report.defenderPlayerId.equals(listener.playerId)) {
+            return true;
+        }
+        PlayerRecord attacker = players.get(report.attackerPlayerId);
+        PlayerRecord defender = players.get(report.defenderPlayerId);
+        return !listener.houseId.isBlank() && ((attacker != null && listener.houseId.equals(attacker.houseId))
+                || (defender != null && listener.houseId.equals(defender.houseId)));
+    }
+
+    private List<Messages.Army> armiesFor(PlayerRecord listener) {
+        return armies.stream().map(army -> {
+            PlayerRecord owner = players.get(army.ownerPlayerId);
+            PlayerRecord target = players.get(army.targetPlayerId);
+            boolean detailed = army.ownerPlayerId.equals(listener.playerId)
+                    || army.targetPlayerId.equals(listener.playerId)
+                    || (!listener.houseId.isBlank()
+                    && ((owner != null && listener.houseId.equals(owner.houseId))
+                    || (target != null && listener.houseId.equals(target.houseId))));
+            return new Messages.Army(army.armyId, army.ownerPlayerId, army.targetPlayerId,
+                    detailed ? army.troops : 0, army.departedEpochMillis, army.arrivesEpochMillis,
+                    army.mission, army.warId);
+        }).toList();
+    }
+
+    private List<ProvinceRecord> orderedProvinces() {
+        return provinces.values().stream()
+                .sorted(Comparator.comparingInt((ProvinceRecord p) -> p.y).thenComparingInt(p -> p.x))
+                .toList();
+    }
+
+    private HouseRecord house(String houseId) throws ProtocolException {
+        HouseRecord house = houses.get(houseId == null ? "" : houseId.trim());
+        if (house == null) {
+            throw new ProtocolException("UNKNOWN_HOUSE", "House does not exist");
+        }
+        return house;
+    }
+
+    private HouseRecord requireHouse(PlayerRecord player) throws ProtocolException {
+        if (player.houseId.isBlank()) {
+            throw new ProtocolException("HOUSE_REQUIRED", "Join or create a House first");
+        }
+        return house(player.houseId);
+    }
+
+    private HouseRecord requireHouseOfficer(PlayerRecord player, boolean strict) throws ProtocolException {
+        HouseRecord house = requireHouse(player);
+        boolean allowed = "SOVEREIGN".equals(player.houseRole) || "MARSHAL".equals(player.houseRole)
+                || (!strict && "STEWARD".equals(player.houseRole));
+        if (!allowed) {
+            throw new ProtocolException("HOUSE_PERMISSION", "This House role cannot perform that action");
+        }
+        return house;
+    }
+
+    private HouseRecord requireHouseWarOfficer(PlayerRecord player) throws ProtocolException {
+        HouseRecord house = requireHouse(player);
+        if (!"SOVEREIGN".equals(player.houseRole) && !"MARSHAL".equals(player.houseRole)) {
+            throw new ProtocolException("HOUSE_PERMISSION", "Only the Sovereign or Marshal controls wars and provinces");
+        }
+        return house;
+    }
+
+    private void requireNoHouse(PlayerRecord player) throws ProtocolException {
+        if (!player.houseId.isBlank()) {
+            throw new ProtocolException("ALREADY_IN_HOUSE", "Player already belongs to a House");
+        }
+    }
+
+    private static void requireHouseEligible(PlayerRecord player, long now) throws ProtocolException {
+        if (player.houseEligibleEpochMillis > now) {
+            throw new ProtocolException("HOUSE_COOLDOWN", "House membership changes are on cooldown until "
+                    + player.houseEligibleEpochMillis);
+        }
+    }
+
+    private void requireHouseCapacity(HouseRecord house) throws ProtocolException {
+        if (houseMemberCount(house.houseId) >= HouseRecord.MAX_MEMBERS) {
+            throw new ProtocolException("HOUSE_FULL", "A House may have at most 20 members");
+        }
+    }
+
+    private int houseMemberCount(String houseId) {
+        return (int) players.values().stream().filter(player -> houseId.equals(player.houseId)).count();
+    }
+
+    private void joinHouse(PlayerRecord player, HouseRecord house, String role, long now) {
+        player.houseId = house.houseId;
+        player.houseRole = role;
+        player.houseJoinedEpochMillis = now;
+        player.houseEligibleEpochMillis = 0;
+        dirty = true;
+    }
+
+    private void removeFromHouse(PlayerRecord player, HouseRecord house, long now) {
+        player.houseId = "";
+        player.houseRole = "";
+        player.houseJoinedEpochMillis = 0;
+        player.houseEligibleEpochMillis = now + HOUSE_CHANGE_COOLDOWN_MILLIS;
+        houseRequests.removeIf(request -> request.playerId.equals(player.playerId));
+        if (houseMemberCount(house.houseId) == 0) {
+            houses.remove(house.houseId);
+            provinces.values().forEach(province -> {
+                if (house.houseId.equals(province.ownerHouseId)) province.ownerHouseId = "";
+                if (house.houseId.equals(province.occupierHouseId)) {
+                    province.occupierHouseId = "";
+                    province.occupationInfluence = 0;
+                }
+            });
+            wars.removeIf(war -> war.involves(house.houseId));
+            houseRequests.removeIf(request -> request.houseId.equals(house.houseId));
+        }
+        dirty = true;
+    }
+
+    private HouseRequestRecord createHouseRequest(String id, String houseId, String playerId,
+            String type, long now) throws ProtocolException {
+        houseRequests.removeIf(request -> request.expiresEpochMillis <= now);
+        if (houseRequests.size() >= syxkingdoms.protocol.Protocol.MAX_HOUSE_REQUESTS_PER_SYNC) {
+            throw new ProtocolException("HOUSE_REQUEST_LIMIT", "The persistent House request queue is full");
+        }
+        boolean duplicate = houseRequests.stream().anyMatch(request -> request.houseId.equals(houseId)
+                && request.playerId.equals(playerId) && request.type.equals(type)
+                && request.expiresEpochMillis > now);
+        if (duplicate) {
+            throw new ProtocolException("HOUSE_REQUEST_EXISTS", "A matching House request is already pending");
+        }
+        return new HouseRequestRecord(id, houseId, playerId, type, now, now + HOUSE_REQUEST_MILLIS);
+    }
+
+    private HouseRequestRecord houseRequest(String requestId) throws ProtocolException {
+        long now = System.currentTimeMillis();
+        return houseRequests.stream().filter(request -> request.requestId.equals(requestId)
+                && request.expiresEpochMillis > now).findFirst()
+                .orElseThrow(() -> new ProtocolException("UNKNOWN_HOUSE_REQUEST", "House request is missing or expired"));
+    }
+
+    private static boolean canManageRole(String actorRole, String targetRole) {
+        return houseRoleRank(actorRole) > houseRoleRank(targetRole);
+    }
+
+    private static int houseRoleRank(String role) {
+        return switch (role) {
+            case "SOVEREIGN" -> 5;
+            case "MARSHAL" -> 4;
+            case "STEWARD" -> 3;
+            case "HERALD" -> 2;
+            case "MEMBER" -> 1;
+            default -> 0;
+        };
+    }
+
+    private static boolean isOfficer(String role) {
+        return houseRoleRank(role) >= houseRoleRank("STEWARD");
+    }
+
+    private static boolean validHouseRole(String role) {
+        return houseRoleRank(role) > 0;
+    }
+
+    private static String normalizeHouseRole(String role) throws ProtocolException {
+        String normalized = role == null ? "" : role.trim().toUpperCase(Locale.ROOT);
+        if (!validHouseRole(normalized)) {
+            throw new ProtocolException("BAD_HOUSE_ROLE", "Role must be SOVEREIGN, MARSHAL, STEWARD, HERALD, or MEMBER");
+        }
+        return normalized;
+    }
+
+    private static String houseName(String input) throws ProtocolException {
+        String value = Normalizer.normalize(input == null ? "" : input, Normalizer.Form.NFKC)
+                .trim().replaceAll("\\s+", " ");
+        if (value.length() < 3 || value.length() > 32) {
+            throw new ProtocolException("BAD_HOUSE_NAME", "House name must contain 3-32 characters");
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char character = value.charAt(i);
+            if (!Character.isLetterOrDigit(character) && character != ' '
+                    && character != '\'' && character != '-') {
+                throw new ProtocolException("BAD_HOUSE_NAME", "House name contains unsupported characters");
+            }
+        }
+        return value;
+    }
+
+    private static String houseTag(String input) throws ProtocolException {
+        String value = input == null ? "" : input.trim().toUpperCase(Locale.ROOT);
+        if (!value.matches("[A-Z0-9]{3,5}")) {
+            throw new ProtocolException("BAD_HOUSE_TAG", "House tag must be 3-5 letters or numbers");
+        }
+        return value;
+    }
+
+    private void ensureHouseNameAvailable(String name, String tag) throws ProtocolException {
+        for (HouseRecord house : houses.values()) {
+            if (nameKey(name).equals(nameKey(house.name))) {
+                throw new ProtocolException("HOUSE_NAME_TAKEN", "That House name is already in use");
+            }
+            if (tag.equals(house.tag)) {
+                throw new ProtocolException("HOUSE_TAG_TAKEN", "That House tag is already in use");
+            }
+        }
+    }
+
+    private ProvinceRecord province(int x, int y) throws ProtocolException {
+        ProvinceRecord province = provinces.get(provinceKey(x, y));
+        if (province == null) {
+            throw new ProtocolException("BAD_PROVINCE", "Province coordinate is outside the world");
+        }
+        return province;
+    }
+
+    private static String provinceKey(int x, int y) {
+        return x + "," + y;
+    }
+
+    private static int coordinate(long value, String field) throws ProtocolException {
+        if (value < 0 || value >= SharedWorld.LINEAR_SCALE) {
+            throw new ProtocolException("BAD_PROVINCE", field + " must be between 0 and 9");
+        }
+        return (int) value;
+    }
+
+    private boolean canClaimProvince(HouseRecord house, PlayerRecord actor, int x, int y) {
+        if (SharedWorld.sectorX(actor.x) == x && SharedWorld.sectorY(actor.y) == y) {
+            return true;
+        }
+        return provinces.values().stream().anyMatch(province -> house.houseId.equals(province.ownerHouseId)
+                && Math.abs(province.x - x) + Math.abs(province.y - y) == 1);
+    }
+
+    private HouseWarRecord war(String warId) throws ProtocolException {
+        return wars.stream().filter(war -> war.warId.equals(warId)).findFirst()
+                .orElseThrow(() -> new ProtocolException("UNKNOWN_WAR", "House war does not exist"));
+    }
+
+    private HouseWarRecord warBetween(String first, String second, long now) {
+        return wars.stream().filter(war -> war.involves(first) && war.involves(second)
+                && (!"ENDED".equals(war.phase) || war.truceEndsEpochMillis > now)).findFirst().orElse(null);
+    }
+
+    private HouseWarRecord activeWar(String first, String second, long now) {
+        if (first == null || second == null || first.isBlank() || second.isBlank()) {
+            return null;
+        }
+        return wars.stream().filter(war -> "ACTIVE".equals(war.phase) && war.involves(first)
+                && war.involves(second) && now < war.endsEpochMillis)
+                .findFirst().orElse(null);
+    }
+
+    private static boolean validWarPhase(String phase) {
+        return "PREPARING".equals(phase) || "ACTIVE".equals(phase)
+                || "TRUCE".equals(phase) || "ENDED".equals(phase);
+    }
+
+    private void endWar(HouseWarRecord war, String surrenderedHouseId, long now) {
+        war.phase = "TRUCE";
+        war.surrenderedHouseId = surrenderedHouseId == null ? "" : surrenderedHouseId;
+        war.truceEndsEpochMillis = now + TRUCE_MILLIS;
+        HouseRecord attacker = houses.get(war.attackerHouseId);
+        HouseRecord defender = houses.get(war.defenderHouseId);
+        if (attacker != null) attacker.seasonPoints += war.attackerScore;
+        if (defender != null) defender.seasonPoints += war.defenderScore;
+        dirty = true;
+    }
+
+    void resolveStrategicTime(long now) {
+        if (houseRequests.removeIf(request -> request.expiresEpochMillis <= now)) dirty = true;
+        for (HouseWarRecord war : wars) {
+            if ("PREPARING".equals(war.phase) && now >= war.startsEpochMillis) {
+                war.phase = "ACTIVE";
+                HouseRecord attacker = houses.get(war.attackerHouseId);
+                if (attacker != null) {
+                    PlayerRecord sovereign = players.get(attacker.sovereignPlayerId);
+                    if (sovereign != null) appendSystemEvent("WAR_ACTIVE", sovereign, "",
+                            attacker.name, war.defenderHouseId, war.endsEpochMillis, 0);
+                }
+                dirty = true;
+            }
+            if ("ACTIVE".equals(war.phase) && now >= war.endsEpochMillis) {
+                endWar(war, "", now);
+            } else if ("TRUCE".equals(war.phase) && now >= war.truceEndsEpochMillis) {
+                war.phase = "ENDED";
+                dirty = true;
+            }
+        }
+        boolean domination = houses.values().stream().anyMatch(house -> ownedProvinceCount(house.houseId) >= 30);
+        if (now >= seasonEndsEpochMillis || domination) {
+            HouseRecord winner = houses.values().stream().max(Comparator.comparingInt(
+                    house -> house.seasonPoints + ownedProvinceCount(house.houseId) * 100)).orElse(null);
+            seasonWinnerHouseId = winner == null ? "" : winner.houseId;
+            if (winner != null) {
+                PlayerRecord sovereign = players.get(winner.sovereignPlayerId);
+                if (sovereign != null) appendSystemEvent("SEASON_WON", sovereign, "", winner.name,
+                        winner.houseId, seasonNumber, ownedProvinceCount(winner.houseId));
+            }
+            seasonNumber++;
+            seasonStartsEpochMillis = now;
+            seasonEndsEpochMillis = now + SEASON_MILLIS;
+            houses.values().forEach(house -> house.seasonPoints = 0);
+            wars.forEach(war -> {
+                if (!"ENDED".equals(war.phase)) {
+                    war.phase = "ENDED";
+                    war.truceEndsEpochMillis = now;
+                }
+            });
+            provinces.values().forEach(province -> {
+                province.occupierHouseId = "";
+                province.occupationInfluence = 0;
+                province.blockadeEndsEpochMillis = 0;
+                province.tributeCrowns = 0;
+            });
+            dirty = true;
+        }
+    }
+
+    private int ownedProvinceCount(String houseId) {
+        return (int) provinces.values().stream().filter(province -> houseId.equals(province.ownerHouseId)).count();
+    }
+
+    private void awardWarScore(HouseWarRecord war, String houseId, int score) {
+        if (war.attackerHouseId.equals(houseId)) war.attackerScore += score;
+        else if (war.defenderHouseId.equals(houseId)) war.defenderScore += score;
+    }
+
+    private void applyOccupation(HouseWarRecord war, String attackingHouseId, String defendingHouseId,
+            int x, int y, int influence, long now) {
+        ProvinceRecord province = provinces.get(provinceKey(x, y));
+        if (province == null || !defendingHouseId.equals(province.ownerHouseId)) return;
+        if (!attackingHouseId.equals(province.occupierHouseId)) {
+            province.occupierHouseId = attackingHouseId;
+            province.occupationInfluence = 0;
+        }
+        province.occupationInfluence = Math.min(100, province.occupationInfluence + influence);
+        province.blockadeEndsEpochMillis = Math.max(province.blockadeEndsEpochMillis, now + 6L * 3_600_000L);
+        province.tributeCrowns = Math.min(1_000_000_000L, province.tributeCrowns + influence * 25L);
+        if (province.occupationInfluence == 100) {
+            awardWarScore(war, attackingHouseId, 50);
+            HouseRecord house = houses.get(attackingHouseId);
+            if (house != null) house.seasonPoints += 50;
+        }
+    }
+
+    private long lootAgainstToday(String attackerId, String defenderId, long now) {
+        long dayStart = now - Math.floorMod(now, 86_400_000L);
+        return battleReports.stream().filter(report -> report.epochMillis >= dayStart
+                && report.attackerPlayerId.equals(attackerId)
+                && report.defenderPlayerId.equals(defenderId)).mapToLong(report -> report.crownsLooted).sum();
+    }
+
+    private long attacksAgainstToday(String attackerId, String defenderId, long now) {
+        long dayStart = now - Math.floorMod(now, 86_400_000L);
+        return battleReports.stream().filter(report -> report.epochMillis >= dayStart
+                && report.attackerPlayerId.equals(attackerId)
+                && report.defenderPlayerId.equals(defenderId)
+                && !"REINFORCED".equals(report.outcome)).count();
+    }
+
+    private void addReport(BattleReportRecord report) {
+        battleReports.add(report);
+        while (battleReports.size() > syxkingdoms.protocol.Protocol.MAX_REPORTS_PER_SYNC) {
+            battleReports.removeFirst();
+        }
+        dirty = true;
     }
 
     private boolean allowCommand(String playerId) {
@@ -859,11 +1785,18 @@ final class World {
     }
 
     private String effectiveStance(String first, String second) {
+        PlayerRecord firstPlayer = players.get(first);
+        PlayerRecord secondPlayer = players.get(second);
+        if (firstPlayer != null && secondPlayer != null) {
+            if (!firstPlayer.houseId.isBlank() && firstPlayer.houseId.equals(secondPlayer.houseId)) {
+                return "ALLY";
+            }
+            if (activeWar(firstPlayer.houseId, secondPlayer.houseId, System.currentTimeMillis()) != null) {
+                return "WAR";
+            }
+        }
         String firstStance = stance(first, second);
         String secondStance = stance(second, first);
-        if ("WAR".equals(firstStance) || "WAR".equals(secondStance)) {
-            return "WAR";
-        }
         return "ALLY".equals(firstStance) && "ALLY".equals(secondStance) ? "ALLY" : "NEUTRAL";
     }
 

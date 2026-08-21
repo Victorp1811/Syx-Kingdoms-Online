@@ -41,6 +41,11 @@ final class WorldEventRecord {
                 || "ARMY_SENT".equals(type) || "BATTLE".equals(type)
                 || "KINGDOM_FOUNDED".equals(type) || "PROTECTION_ENDED".equals(type)
                 || "CREST_UPDATED".equals(type)
+                || type.startsWith("HOUSE_") && !"HOUSE_CHAT".equals(type)
+                || type.startsWith("WAR_") || type.startsWith("PROVINCE_")
+                || "TRIBUTE_COLLECTED".equals(type) || "SEASON_WON".equals(type)
+                || "REINFORCEMENT_SENT".equals(type) || "REINFORCEMENT_ARRIVED".equals(type)
+                || "ARMY_RETURNED".equals(type)
                 || type.startsWith("OFFER_")
                 || actorPlayerId.equals(playerId) || targetPlayerId.equals(playerId);
     }

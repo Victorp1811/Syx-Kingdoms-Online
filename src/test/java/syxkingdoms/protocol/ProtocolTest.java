@@ -7,8 +7,8 @@ import java.util.List;
 
 public final class ProtocolTest {
     public static void main(String[] args) throws Exception {
-        Messages.Hello hello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.9.0",
-                "Syx Kingdoms Online@0.9.0", 0, 0, "world-one",
+        Messages.Hello hello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.12.0",
+                "Syx Kingdoms Online@0.12.0", 0, 0, "world-one",
                 "player-123", "a-secure-token-that-is-long-enough", "Ruler Name",
                 "Northern Realm", "Cité 北", "Friendly Realm");
         Messages.Hello decoded = Messages.Hello.decode(hello.encode());
@@ -68,6 +68,24 @@ public final class ProtocolTest {
         equal(crestMessage, Messages.Crest.decode(crestMessage.encode()), "crest frame round trip");
         equal(crest.mirrorHorizontal().pixel(31, 0), 1, "horizontal crest mirror");
         equal(crest.mirrorVertical().pixel(31, 0), 15, "vertical crest mirror");
+        Messages.House house = new Messages.House("house-123", "Oak Council", "OAK", "p1",
+                "Stand together", 2, 1, 2, 500, crest.hash(), crest.pixelsEncoded(), crest.paletteHex());
+        equal(house, Messages.House.decode(house.encode()), "House frame round trip");
+        Messages.HouseMember member = new Messages.HouseMember("p1", "house-123", "SOVEREIGN", 5000);
+        equal(member, Messages.HouseMember.decode(member.encode()), "House member round trip");
+        Messages.HouseRequest request = new Messages.HouseRequest("request-123", "house-123", "p2",
+                "INVITE", 5000, 6000);
+        equal(request, Messages.HouseRequest.decode(request.encode()), "House request round trip");
+        Messages.Province province = new Messages.Province(1, 2, "house-123", "house-456", 75, 8000, 900);
+        equal(province, Messages.Province.decode(province.encode()), "province round trip");
+        Messages.HouseWar war = new Messages.HouseWar("war-12345", "house-123", "house-456",
+                "ACTIVE", 1000, 2000, 3000, 10, 8, 0, "");
+        equal(war, Messages.HouseWar.decode(war.encode()), "House war round trip");
+        Messages.BattleReport report = new Messages.BattleReport("report-123", 4000, "p1", "p2",
+                "war-12345", "ATTACKER_WIN", 100, 60, 40, 0, 200, 1, 2, 12);
+        equal(report, Messages.BattleReport.decode(report.encode()), "battle report round trip");
+        Messages.Season season = new Messages.Season(2, 1000, 3000, "house-123", "ACTIVE");
+        equal(season, Messages.Season.decode(season.encode()), "season round trip");
 
         SharedWorldTerrain terrain = new SharedWorldTerrain("test-seed");
         SharedWorldTerrain sameTerrain = new SharedWorldTerrain("test-seed");

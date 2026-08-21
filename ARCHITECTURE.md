@@ -10,8 +10,8 @@ server authority over state that crosses city boundaries.
 
 Songs of Syx 0.71.44 defines its base world with a tile dimension of 256. The
 online coordinate plane is exactly `2560 × 2560`: ten base maps along each axis,
-or 100 base-map-sized sectors. City coordinates, future travel routes, and future
-territorial ownership all use this persistent server coordinate system.
+or 100 base-map-sized provinces. City coordinates, travel routes, House capitals,
+and territorial ownership all use this persistent server coordinate system.
 The server seed deterministically produces coarse water, plains, forest, and
 mountain terrain. Only plains and forest accept city slots. Because generation is
 shared protocol code, clients reconstruct identical geography without downloading
@@ -25,7 +25,7 @@ globally, rather than merely one verified world file per server installation.
 | Owner | State |
 | --- | --- |
 | Client city shard | citizens, rooms, jobs, local production, local rendering |
-| Dedicated server | identity, founding names, city slot, protection, world clock, presence, trade, diplomacy, armies |
+| Dedicated server | identity, founding names, city slot, protection, world clock, presence, trade, Houses, wars, provinces, seasons, armies |
 | Derived/cached on client | remote city summaries and shared-world presentation |
 
 Clients submit bounded commands. The server validates and persists them, then
@@ -33,7 +33,7 @@ returns authoritative results. A client never writes another player's city state
 
 ## Current vertical slice
 
-The V6 wire protocol uses bounded UTF-8, tab-separated frames with base64url text
+The V9 wire protocol uses bounded UTF-8, tab-separated frames with base64url text
 fields. On connection, a client authenticates its stable player ID and token and
 reports its exact game, client, and active-mod versions. The client refuses to
 connect when another mod is active, and the server independently enforces the
@@ -54,9 +54,10 @@ purchases. Public, province-local, and private events are paged through a
 visibility-aware cursor. Local messages record the sender's base-map-sized sector
 and are delivered only to identities whose cities occupy that same sector; all
 chat actor names come from the permanent server profile.
-Persisted world format 9 records founding profiles, protection deadlines, and
-validated 32×32 indexed-color kingdom crests in addition to the public order book
-and partial fills. Each crest has one transparent and fifteen editable RGB palette
+Persisted world format 12 records founding profiles, protection deadlines,
+validated 32×32 indexed-color kingdom and House crests, House rosters/requests,
+100 provinces, formal wars, battle reports, and season state in addition to the
+public order book and partial fills. Each crest has one transparent and fifteen editable RGB palette
 slots, a SHA-256 content hash, and a monotonic revision. Paged crest frames let
 clients cache designs without including every crest in every heartbeat. New kingdoms receive a
 configurable five-day default protection window. Incoming armies are rejected
@@ -105,8 +106,20 @@ treasury summaries without granting the server arbitrary access to the local sav
    journal. Non-modal UI and trusted client/account attestation remain future work.
 10. **Kingdom identity (implemented MVP):** server-owned 32×32/16-slot crests,
     native-banner import, an in-game pixel editor, large previews, persistence,
-    validation, hashes, and revision-aware client caches. House crests will reuse
-    this format when guild membership is implemented.
+    validation, hashes, and revision-aware client caches.
+11. **Houses and multiplayer workspace (implemented):** six focused UI tabs;
+    persistent unique Houses; invitations/applications; five permissioned roles;
+    a 20-member cap; House chat, announcements, rosters, audit events, map color,
+    membership cooldowns, and House crests. Shared treasuries and passive House
+    bonuses are intentionally excluded from this release.
+12. **Formal PvP (implemented strategic layer):** House declarations, 12-hour
+    preparation, seven-day wars, reinforcements, concealed composition, offline
+    defense, reports, daily loot/repeat-target limits, surrender, truces, and no
+    city deletion. Full tactical battle-instance co-simulation remains future work.
+13. **Province warfare and seasons (implemented strategic layer):** authoritative
+    ownership of all 100 provinces, capital/adjacent claims, occupation influence,
+    annexation, blockades, tribute, war score, 30-day seasons, domination victory, high-score
+    fallback, and persistent winner state.
 
 ## Non-goals
 

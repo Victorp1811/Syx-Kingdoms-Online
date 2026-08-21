@@ -4,19 +4,24 @@ Syx Kingdoms Online treats each Songs of Syx process as one local city shard and
 the dedicated service as the authority for everything shared between kingdoms.
 The following rules are mandatory while the mod is enabled.
 
-## Enforced in V0.9
+## Enforced in V0.12
 
 | Area | Online rule |
 | --- | --- |
 | Connection | The local city is frozen at 0x while connecting, founding, disconnected, or more than three heartbeat intervals behind the server. |
 | Time | A fresh session runs at exactly 1x. Pause and all vanilla speed hotkeys are consumed, and the target/actual speed is corrected during updates and rendering. |
-| Compatibility | Exactly Syx Kingdoms Online V0.9 and its one forced script may be active. Extra scripts and Songs of Syx development/debug mode are rejected. |
+| Compatibility | Exactly Syx Kingdoms Online V0.12 and its one forced script may be active. Extra scripts and Songs of Syx development/debug mode are rejected. |
 | Debug/loading hotkeys | The debugger and quickload hotkeys are consumed. Quicksave remains available. |
 | Saves | New saves contain the persistent world ID, player identity, and trade-ledger revision. Loading that city with another identity freezes and closes its online client. Later resource debits are re-applied when an older save is loaded. V0.6 saves are migrated on their next save. |
 | World strategy | The vanilla world screen is redirected back to the settlement. The multiplayer map is the only shared strategic map. |
 | Trade | Vanilla AI import/export limits are locked to zero. Player shipments and public offers use server commands and the crash-safe escrow ledger. |
-| Shared actions | Province-local chat, global chat, mail, diplomacy, crowns, levies, protection, armies, deliveries, and market offers are validated and persisted by the server. Local chat reaches only kingdoms in the sender's `256 × 256` province. Every message is stamped with the sender's server-owned permanent ruler name. |
+| Shared actions | Province-local/global/House chat, mail, alliances, crowns, levies, protection, armies, Houses, wars, provinces, reports, deliveries, and market offers are validated and persisted by the server. Every message is stamped with the permanent ruler name. |
 | Crests | Kingdom crests use exactly 32×32 indexed pixels, one transparent slot, and fifteen editable RGB colors. The server validates, hashes, revisions, persists, and distributes each design; clients cannot attach an arbitrary image file. |
+| Houses | Names and 3-5 character tags are unique. Houses have at most 20 members. Invitations, applications, five roles, leadership, kicks, announcements, chat, and crest edits are server-permissioned. Leaving or being kicked starts a 24-hour membership cooldown. |
+| PvP | Instant WAR stance is disabled. Only Sovereigns/Marshals can declare House war. Preparation is 12 hours, combat lasts at most seven days, and surrender/expiry creates a 72-hour truce. Cities are never deleted. |
+| Combat | Levies, travel, offline defense, survivor returns, reports, loot caps, repeat-target limits, war score, blockades, occupation, and tribute are server-owned. Uninvolved observers see an army route but not its troop count. |
+| Province transfer | A fully occupied enemy province can be annexed only during active war and when adjacent to attacker territory. A House capital must be taken last. |
+| Provinces/seasons | The fixed map has 100 provinces. Claims must contain the claimant's city or touch existing House territory. Seasons last 30 days; 30 owned provinces wins immediately, otherwise combined province/war score decides. |
 | Mods | Any additional active mod blocks startup; the server independently requires the exact manifest. |
 
 Local construction, citizens, production, rooms, research, and ordinary city

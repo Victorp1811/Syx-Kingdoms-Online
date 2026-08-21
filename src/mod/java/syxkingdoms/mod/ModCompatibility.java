@@ -5,7 +5,7 @@ import init.paths.PATHS;
 import snake2d.util.sets.LIST;
 
 final class ModCompatibility {
-    static final String REQUIRED_MANIFEST = "Syx Kingdoms Online@0.9.0";
+    static final String REQUIRED_MANIFEST = "Syx Kingdoms Online@0.12.0";
 
     private ModCompatibility() {
     }

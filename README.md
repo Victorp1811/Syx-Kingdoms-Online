@@ -7,7 +7,7 @@ player identity, settlement roster, trade, diplomacy, and armies.
 There is one canonical persistent world: its ID, dimensions, geography seed, and
 terrain-generation version are fixed rather than chosen by individual players.
 
-This repository currently contains a playable shared-world MVP:
+This repository currently contains the V0.12 playable shared-world vertical slice:
 
 - a dedicated Java server with an atomically persisted world;
 - authenticated, reconnectable player identities;
@@ -33,6 +33,15 @@ This repository currently contains a playable shared-world MVP:
   resolution;
 - server-owned 32×32 kingdom crests with 16 editable palette slots, native-banner
   import, revision caching, and large map/profile previews;
+- persistent Houses with unique tags, invitations/applications, a 20-member cap,
+  five permissioned roles, House chat, announcements, audit events, and editable
+  32×32 House crests;
+- formal House warfare with a 12-hour preparation phase, seven-day war window,
+  allied reinforcements, concealed army strength, server-resolved offline defense,
+  private/allied reports, capped loot, anti-farming, surrender, and 72-hour truces;
+- 100 persistent provinces with House ownership, capital provinces, adjacency
+  claims, occupation influence, annexation, blockades, daily tribute, map colors, 30-day
+  seasons, war score, and domination/high-score victory conditions;
 - five real days of beginner protection; protected kingdoms cannot be attacked,
   and launching an army ends the attacker's remaining protection;
 - clickable shared-map controls using Songs of Syx's native text prompts;
@@ -82,7 +91,7 @@ build/dist/server/                    dedicated server
 
    Then enable it in the launcher and disable every other mod. The client checks
    Songs of Syx's active-mod list before connecting, and the server also requires
-   the exact `Syx Kingdoms Online@0.9.0` manifest. The installer preserves an
+   the exact `Syx Kingdoms Online@0.12.0` manifest. The installer preserves an
    existing client `config.txt`; pass `-ResetConfig` only when you intentionally
    want the defaults.
 4. Start or load a city. On the first connection, native in-game prompts ask for
@@ -97,17 +106,19 @@ build/dist/server/                    dedicated server
    server-defined shared map; your city is orange, online rivals are green, and
    offline cities are gray. Grid lines divide the online world into 100 sectors;
    every sector is the same `256 × 256` size as a normal base-game world map.
-   Click another city to select it. Controls below the map provide Local chat
-   for rulers inside your current `256 × 256` province, Global chat for the
-   entire world, private mail, diplomacy, crown transfers, armies, and goods
-   shipments. Every chat line uses the permanent ruler name chosen at founding;
+   Click another city to select it, then use the six tabs: **World Map**,
+   **Chat/Mail**, **House**, **Armies/Reports**, **Market**, and
+   **Profile/Crest**. Local chat reaches rulers inside your current `256 × 256`
+   province; global chat reaches the entire world; House chat reaches only your
+   current House. Every chat line uses the permanent ruler name chosen at founding;
    the server never accepts a nickname supplied with a message. Goods
    use `RESOURCE_KEY AMOUNT`, for example `WOOD 100`. Public sell offers use
    `RESOURCE_KEY QUANTITY UNIT_PRICE`, for example `WOOD 100 3`; Prev/Next browse
    the canonical order book, Buy accepts a quantity, and sellers can cancel their
    current offer to receive unsold goods back.
 
-   Use **Edit crest** in the overlay header to open the non-modal 32×32 editor.
+   Use **Profile/Crest** to edit a kingdom crest or, with the Sovereign/Herald
+   role, the House crest. The shared 32×32 editor
    Left-drag paints, right-drag erases, and the sixteen palette slots include one
    transparent slot plus fifteen independently editable RGB colors. The editor
    supports undo, redo, clear, horizontal/vertical mirror, native-banner import,
@@ -117,6 +128,15 @@ build/dist/server/                    dedicated server
    A newly founded kingdom is protected from incoming armies for five real days.
    The overlay shows the remaining protection. Sending an army while protected
    displays a warning and permanently ends the sender's remaining protection.
+
+   PvP requires both kingdoms to belong to different Houses. A Sovereign or
+   Marshal declares war from **Armies/Reports**. The server announces the war,
+   enforces twelve hours of preparation, then permits attacks for seven days.
+   Defenders use their server-owned levy balance even while offline. Victories
+   generate reports, capped crown loot, war score, and occupation influence in
+   the defender's province. Surrender never deletes a city and starts a 72-hour
+   truce. A season lasts 30 days; owning 30 provinces wins immediately, otherwise
+   the highest combined province/war score wins at the deadline.
 
 The 10× measurement is linear: the online grid is ten base maps wide and ten
 base maps tall. Its total coordinate area is therefore 100 times the base map.

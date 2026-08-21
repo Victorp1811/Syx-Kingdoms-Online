@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.12.0 - 2026-08-20
+
+- Upgraded the wire protocol to version 9 and persistent world format to 12.
+- Made the existing 10×10 sector grid authoritative as 100 persistent provinces.
+- Added House province claims, capital provinces, adjacency validation, ownership,
+  siege influence, six-hour blockades, occupation, annexation, daily tribute, and map colors.
+- Added 30-day seasons, House scoring, a 30-province domination victory condition,
+  highest-score fallback, winner history, and season rollover that preserves
+  ownership while clearing wars and occupation state.
+- Added province, war, report, and season persistence/restart validation.
+
+## 0.11.0 - 2026-08-20
+
+- Replaced instant WAR stances with formal House wars: twelve hours of visible
+  preparation, up to seven days active, surrender, and a 72-hour truce.
+- Added House-allied reinforcements, server-owned offense/defense resolution,
+  survivor returns, detailed private/allied battle reports, and concealed troop
+  counts for uninvolved observers.
+- Added offline defense, per-target daily loot caps, repeat-target score and
+  occupation limits, war score, surrender without city deletion, and automatic
+  return of armies whose war ends before arrival.
+
+## 0.10.0 - 2026-08-20
+
+- Added persistent Houses with unique names, 3-5 character tags, a 20-member
+  cap, invitations, applications, acceptance/rejection, leaving, kicking, and a
+  24-hour membership-change cooldown.
+- Added Sovereign, Marshal, Steward, Herald, and Member roles with server-side
+  permission checks and leadership transfer.
+- Added House chat, announcements, public rosters/profiles, audit events, and
+  House crests using the existing 32×32/16-color editor.
+- Replaced the single crowded overlay workflow with tabs for World Map,
+  Chat/Mail, House, Armies/Reports, Market, and Profile/Crest.
+
 ## 0.9.0 - 2026-08-20
 
 - Upgraded the wire protocol to version 6 and persistent world format to 9.

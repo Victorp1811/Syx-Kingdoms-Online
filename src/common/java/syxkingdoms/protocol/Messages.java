@@ -416,6 +416,250 @@ public final class Messages {
         }
     }
 
+    public record House(
+            String houseId,
+            String name,
+            String tag,
+            String sovereignPlayerId,
+            String announcement,
+            int memberCount,
+            int capitalProvinceX,
+            int capitalProvinceY,
+            int seasonPoints,
+            String crestHash,
+            String crestPixels,
+            String crestPalette) {
+        public String encode() {
+            return Protocol.frame("HOUSE", Protocol.encodeText(houseId), Protocol.encodeText(name),
+                    tag, Protocol.encodeText(sovereignPlayerId), Protocol.encodeText(announcement),
+                    Integer.toString(memberCount), Integer.toString(capitalProvinceX),
+                    Integer.toString(capitalProvinceY), Integer.toString(seasonPoints), crestHash,
+                    Protocol.encodeText(crestPixels), Protocol.encodeText(crestPalette));
+        }
+
+        public static House decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "HOUSE", 13);
+            String hash = f[10];
+            String pixels = Protocol.decodeText(f[11], "houseCrestPixels");
+            String palette = Protocol.decodeText(f[12], "houseCrestPalette");
+            if (!hash.isBlank()) {
+                if (!hash.matches("[0-9a-f]{64}")) {
+                    throw new ProtocolException("BAD_HOUSE", "House crest hash is invalid");
+                }
+                CrestDesign crest = CrestDesign.decode(pixels, palette);
+                if (!hash.equals(crest.hash())) {
+                    throw new ProtocolException("BAD_HOUSE", "House crest hash does not match its design");
+                }
+            } else if (!pixels.isBlank() || !palette.isBlank()) {
+                throw new ProtocolException("BAD_HOUSE", "House crest data has no hash");
+            }
+            String tag = f[3];
+            if (!tag.matches("[A-Z0-9]{3,5}")) {
+                throw new ProtocolException("BAD_HOUSE", "House tag is invalid");
+            }
+            return new House(Protocol.decodeText(f[1], "houseId"),
+                    Protocol.decodeText(f[2], "houseName"), tag,
+                    Protocol.decodeText(f[4], "houseSovereign"),
+                    Protocol.decodeText(f[5], "houseAnnouncement"),
+                    Protocol.parseInt(f[6], "houseMemberCount", 1, 20),
+                    Protocol.parseInt(f[7], "houseCapitalX", -1, 9),
+                    Protocol.parseInt(f[8], "houseCapitalY", -1, 9),
+                    Protocol.parseInt(f[9], "houseSeasonPoints", 0, 1_000_000_000),
+                    hash, pixels, palette);
+        }
+
+        public CrestDesign crest() throws ProtocolException {
+            return crestHash.isBlank() ? null : CrestDesign.decode(crestPixels, crestPalette);
+        }
+    }
+
+    public record HousesHeader(int houseCount) {
+        public String encode() { return Protocol.frame("HOUSES", Integer.toString(houseCount)); }
+        public static HousesHeader decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "HOUSES", 2);
+            return new HousesHeader(Protocol.parseInt(f[1], "houseCount", 0, Protocol.MAX_HOUSES_PER_SYNC));
+        }
+    }
+
+    public record HouseMember(String playerId, String houseId, String role, long joinedEpochMillis) {
+        public String encode() {
+            return Protocol.frame("HOUSE_MEMBER", Protocol.encodeText(playerId), Protocol.encodeText(houseId),
+                    role, Long.toString(joinedEpochMillis));
+        }
+        public static HouseMember decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "HOUSE_MEMBER", 5);
+            String role = houseRole(f[3]);
+            return new HouseMember(Protocol.decodeText(f[1], "memberPlayerId"),
+                    Protocol.decodeText(f[2], "memberHouseId"), role,
+                    Protocol.parseLong(f[4], "memberJoined", 0, Long.MAX_VALUE));
+        }
+    }
+
+    public record HouseMembersHeader(int memberCount) {
+        public String encode() { return Protocol.frame("HOUSE_MEMBERS", Integer.toString(memberCount)); }
+        public static HouseMembersHeader decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "HOUSE_MEMBERS", 2);
+            return new HouseMembersHeader(Protocol.parseInt(f[1], "houseMemberCount", 0,
+                    Protocol.MAX_HOUSE_MEMBERS_PER_SYNC));
+        }
+    }
+
+    public record HouseRequest(String requestId, String houseId, String playerId, String type,
+            long createdEpochMillis, long expiresEpochMillis) {
+        public String encode() {
+            return Protocol.frame("HOUSE_REQUEST", Protocol.encodeText(requestId),
+                    Protocol.encodeText(houseId), Protocol.encodeText(playerId), type,
+                    Long.toString(createdEpochMillis), Long.toString(expiresEpochMillis));
+        }
+        public static HouseRequest decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "HOUSE_REQUEST", 7);
+            if (!"INVITE".equals(f[4]) && !"APPLICATION".equals(f[4])) {
+                throw new ProtocolException("BAD_HOUSE_REQUEST", "Unknown House request type");
+            }
+            long created = Protocol.parseLong(f[5], "houseRequestCreated", 0, Long.MAX_VALUE);
+            long expires = Protocol.parseLong(f[6], "houseRequestExpires", created, Long.MAX_VALUE);
+            return new HouseRequest(Protocol.decodeText(f[1], "houseRequestId"),
+                    Protocol.decodeText(f[2], "requestHouseId"),
+                    Protocol.decodeText(f[3], "requestPlayerId"), f[4], created, expires);
+        }
+    }
+
+    public record HouseRequestsHeader(int requestCount) {
+        public String encode() { return Protocol.frame("HOUSE_REQUESTS", Integer.toString(requestCount)); }
+        public static HouseRequestsHeader decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "HOUSE_REQUESTS", 2);
+            return new HouseRequestsHeader(Protocol.parseInt(f[1], "houseRequestCount", 0,
+                    Protocol.MAX_HOUSE_REQUESTS_PER_SYNC));
+        }
+    }
+
+    public record Province(int x, int y, String ownerHouseId, String occupierHouseId,
+            int occupationInfluence, long blockadeEndsEpochMillis, long tributeCrowns) {
+        public String encode() {
+            return Protocol.frame("PROVINCE", Integer.toString(x), Integer.toString(y),
+                    Protocol.encodeText(ownerHouseId), Protocol.encodeText(occupierHouseId),
+                    Integer.toString(occupationInfluence), Long.toString(blockadeEndsEpochMillis),
+                    Long.toString(tributeCrowns));
+        }
+        public static Province decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "PROVINCE", 8);
+            return new Province(Protocol.parseInt(f[1], "provinceX", 0, 9),
+                    Protocol.parseInt(f[2], "provinceY", 0, 9),
+                    Protocol.decodeText(f[3], "provinceOwner"),
+                    Protocol.decodeText(f[4], "provinceOccupier"),
+                    Protocol.parseInt(f[5], "provinceInfluence", 0, 100),
+                    Protocol.parseLong(f[6], "provinceBlockadeEnds", 0, Long.MAX_VALUE),
+                    Protocol.parseLong(f[7], "provinceTribute", 0, 1_000_000_000L));
+        }
+    }
+
+    public record ProvincesHeader(int provinceCount) {
+        public String encode() { return Protocol.frame("PROVINCES", Integer.toString(provinceCount)); }
+        public static ProvincesHeader decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "PROVINCES", 2);
+            return new ProvincesHeader(Protocol.parseInt(f[1], "provinceCount", 0,
+                    Protocol.MAX_PROVINCES_PER_SYNC));
+        }
+    }
+
+    public record HouseWar(String warId, String attackerHouseId, String defenderHouseId,
+            String phase, long declaredEpochMillis, long startsEpochMillis, long endsEpochMillis,
+            int attackerScore, int defenderScore, long truceEndsEpochMillis, String surrenderedHouseId) {
+        public String encode() {
+            return Protocol.frame("HOUSE_WAR", Protocol.encodeText(warId),
+                    Protocol.encodeText(attackerHouseId), Protocol.encodeText(defenderHouseId), phase,
+                    Long.toString(declaredEpochMillis), Long.toString(startsEpochMillis),
+                    Long.toString(endsEpochMillis), Integer.toString(attackerScore),
+                    Integer.toString(defenderScore), Long.toString(truceEndsEpochMillis),
+                    Protocol.encodeText(surrenderedHouseId));
+        }
+        public static HouseWar decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "HOUSE_WAR", 12);
+            if (!"PREPARING".equals(f[4]) && !"ACTIVE".equals(f[4])
+                    && !"TRUCE".equals(f[4]) && !"ENDED".equals(f[4])) {
+                throw new ProtocolException("BAD_WAR", "Unknown House war phase");
+            }
+            long declared = Protocol.parseLong(f[5], "warDeclared", 0, Long.MAX_VALUE);
+            long starts = Protocol.parseLong(f[6], "warStarts", declared, Long.MAX_VALUE);
+            long ends = Protocol.parseLong(f[7], "warEnds", starts, Long.MAX_VALUE);
+            return new HouseWar(Protocol.decodeText(f[1], "warId"),
+                    Protocol.decodeText(f[2], "warAttackerHouse"),
+                    Protocol.decodeText(f[3], "warDefenderHouse"), f[4], declared, starts, ends,
+                    Protocol.parseInt(f[8], "warAttackerScore", 0, 1_000_000_000),
+                    Protocol.parseInt(f[9], "warDefenderScore", 0, 1_000_000_000),
+                    Protocol.parseLong(f[10], "warTruceEnds", 0, Long.MAX_VALUE),
+                    Protocol.decodeText(f[11], "warSurrenderedHouse"));
+        }
+    }
+
+    public record WarsHeader(int warCount) {
+        public String encode() { return Protocol.frame("WARS", Integer.toString(warCount)); }
+        public static WarsHeader decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "WARS", 2);
+            return new WarsHeader(Protocol.parseInt(f[1], "warCount", 0, Protocol.MAX_WARS_PER_SYNC));
+        }
+    }
+
+    public record BattleReport(String reportId, long epochMillis, String attackerPlayerId,
+            String defenderPlayerId, String warId, String outcome, int attackingTroops,
+            int defendingTroops, int attackerSurvivors, int defenderSurvivors, long crownsLooted,
+            int provinceX, int provinceY, int warScore) {
+        public String encode() {
+            return Protocol.frame("BATTLE_REPORT", Protocol.encodeText(reportId), Long.toString(epochMillis),
+                    Protocol.encodeText(attackerPlayerId), Protocol.encodeText(defenderPlayerId),
+                    Protocol.encodeText(warId), outcome, Integer.toString(attackingTroops),
+                    Integer.toString(defendingTroops), Integer.toString(attackerSurvivors),
+                    Integer.toString(defenderSurvivors), Long.toString(crownsLooted),
+                    Integer.toString(provinceX), Integer.toString(provinceY), Integer.toString(warScore));
+        }
+        public static BattleReport decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "BATTLE_REPORT", 15);
+            if (!"ATTACKER_WIN".equals(f[6]) && !"DEFENDER_WIN".equals(f[6])
+                    && !"REINFORCED".equals(f[6])) {
+                throw new ProtocolException("BAD_REPORT", "Unknown battle report outcome");
+            }
+            return new BattleReport(Protocol.decodeText(f[1], "reportId"),
+                    Protocol.parseLong(f[2], "reportTime", 0, Long.MAX_VALUE),
+                    Protocol.decodeText(f[3], "reportAttacker"),
+                    Protocol.decodeText(f[4], "reportDefender"),
+                    Protocol.decodeText(f[5], "reportWar"), f[6],
+                    Protocol.parseInt(f[7], "reportAttacking", 0, 10_000),
+                    Protocol.parseInt(f[8], "reportDefending", 0, 10_000),
+                    Protocol.parseInt(f[9], "reportAttackerSurvivors", 0, 10_000),
+                    Protocol.parseInt(f[10], "reportDefenderSurvivors", 0, 10_000),
+                    Protocol.parseLong(f[11], "reportLoot", 0, 1_000_000_000L),
+                    Protocol.parseInt(f[12], "reportProvinceX", 0, 9),
+                    Protocol.parseInt(f[13], "reportProvinceY", 0, 9),
+                    Protocol.parseInt(f[14], "reportWarScore", 0, 1_000_000));
+        }
+    }
+
+    public record ReportsHeader(int reportCount) {
+        public String encode() { return Protocol.frame("REPORTS", Integer.toString(reportCount)); }
+        public static ReportsHeader decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "REPORTS", 2);
+            return new ReportsHeader(Protocol.parseInt(f[1], "reportCount", 0, Protocol.MAX_REPORTS_PER_SYNC));
+        }
+    }
+
+    public record Season(int number, long startsEpochMillis, long endsEpochMillis,
+            String winnerHouseId, String phase) {
+        public String encode() {
+            return Protocol.frame("SEASON", Integer.toString(number), Long.toString(startsEpochMillis),
+                    Long.toString(endsEpochMillis), Protocol.encodeText(winnerHouseId), phase);
+        }
+        public static Season decode(String line) throws ProtocolException {
+            String[] f = Protocol.split(line, "SEASON", 6);
+            if (!"ACTIVE".equals(f[5]) && !"COMPLETE".equals(f[5])) {
+                throw new ProtocolException("BAD_SEASON", "Unknown season phase");
+            }
+            long starts = Protocol.parseLong(f[2], "seasonStarts", 0, Long.MAX_VALUE);
+            return new Season(Protocol.parseInt(f[1], "seasonNumber", 1, Integer.MAX_VALUE), starts,
+                    Protocol.parseLong(f[3], "seasonEnds", starts, Long.MAX_VALUE),
+                    Protocol.decodeText(f[4], "seasonWinner"), f[5]);
+        }
+    }
+
     public record Relation(
             String playerId,
             String playerName,
@@ -470,24 +714,37 @@ public final class Messages {
             String targetPlayerId,
             int troops,
             long departedEpochMillis,
-            long arrivesEpochMillis) {
+            long arrivesEpochMillis,
+            String mission,
+            String warId) {
+        public Army(String armyId, String ownerPlayerId, String targetPlayerId, int troops,
+                long departedEpochMillis, long arrivesEpochMillis) {
+            this(armyId, ownerPlayerId, targetPlayerId, troops, departedEpochMillis,
+                    arrivesEpochMillis, "ATTACK", "");
+        }
+
         public String encode() {
             return Protocol.frame("ARMY", Protocol.encodeText(armyId), Protocol.encodeText(ownerPlayerId),
                     Protocol.encodeText(targetPlayerId), Integer.toString(troops),
-                    Long.toString(departedEpochMillis), Long.toString(arrivesEpochMillis));
+                    Long.toString(departedEpochMillis), Long.toString(arrivesEpochMillis), mission,
+                    Protocol.encodeText(warId));
         }
 
         public static Army decode(String line) throws ProtocolException {
-            String[] f = Protocol.split(line, "ARMY", 7);
+            String[] f = Protocol.split(line, "ARMY", 9);
             long departed = Protocol.parseLong(f[5], "armyDeparted", 0, Long.MAX_VALUE);
             long arrives = Protocol.parseLong(f[6], "armyArrives", 0, Long.MAX_VALUE);
             if (arrives < departed) {
                 throw new ProtocolException("BAD_ARMY", "Army arrival precedes departure");
             }
+            if (!"ATTACK".equals(f[7]) && !"REINFORCE".equals(f[7])) {
+                throw new ProtocolException("BAD_ARMY", "Unknown army mission");
+            }
             return new Army(Protocol.decodeText(f[1], "armyId"),
                     Protocol.decodeText(f[2], "armyOwnerId"),
                     Protocol.decodeText(f[3], "armyTargetId"),
-                    Protocol.parseInt(f[4], "armyTroops", 1, 10_000), departed, arrives);
+                    Protocol.parseInt(f[4], "armyTroops", 0, 10_000), departed, arrives, f[7],
+                    Protocol.decodeText(f[8], "armyWarId"));
         }
     }
 
@@ -578,6 +835,15 @@ public final class Messages {
     private static String stance(String value) throws ProtocolException {
         if (!"NEUTRAL".equals(value) && !"ALLY".equals(value) && !"WAR".equals(value)) {
             throw new ProtocolException("BAD_STANCE", "Stance must be NEUTRAL, ALLY, or WAR");
+        }
+        return value;
+    }
+
+    private static String houseRole(String value) throws ProtocolException {
+        if (!"SOVEREIGN".equals(value) && !"MARSHAL".equals(value)
+                && !"STEWARD".equals(value) && !"HERALD".equals(value)
+                && !"MEMBER".equals(value)) {
+            throw new ProtocolException("BAD_HOUSE_ROLE", "Unknown House role");
         }
         return value;
     }

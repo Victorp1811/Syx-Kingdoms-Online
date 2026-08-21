@@ -109,26 +109,39 @@ public final class ServerIntegrationTest {
                         && replayedBuy.marketOffers().getFirst().quantity() == 30,
                         "replayed market purchase cannot charge crowns or fill goods twice");
 
-                Messages.Command declareWar = command("alice-war", "STANCE", "bob-id", "WAR", "");
-                alice.update(9, 321, 9000, List.of(declareWar));
+                Messages.Command aliceHouse = new Messages.Command("alice-house-01", "CREATE_HOUSE", "",
+                        "OAK", 0, 0, "Oak Alliance");
+                Sync aliceHouseSync = alice.update(9, 321, 9000, List.of(aliceHouse));
+                Messages.Command bobHouse = new Messages.Command("bob-house-0001", "CREATE_HOUSE", "",
+                        "ASH", 0, 0, "Ash League");
+                Sync bobHouseSync = bob.update(8, 654, 8000, List.of(bobHouse));
+                WorldPersistenceTest.check(aliceHouseSync.results().getFirst().accepted()
+                        && bobHouseSync.results().getFirst().accepted()
+                        && bobHouseSync.houses().size() == 2 && bobHouseSync.houseMembers().size() == 2
+                        && bobHouseSync.provinces().size() == 100,
+                        "House membership and 100 provinces synchronize over the wire");
+                Messages.Command declareWar = command("alice-war", "DECLARE_HOUSE_WAR", "", "bob-house-0001", "");
+                Sync declared = alice.update(10, 321, 9000, List.of(declareWar));
+                WorldPersistenceTest.check(declared.results().getFirst().accepted()
+                        && "PREPARING".equals(declared.wars().getFirst().phase()),
+                        "formal war synchronizes in its preparation phase");
                 Messages.Command sendArmy = new Messages.Command("send-army-01", "SEND_ARMY",
                         "bob-id", "", 10, 0, "");
-                Sync marching = alice.update(10, 321, 9000, List.of(sendArmy));
-                WorldPersistenceTest.check(marching.playerState().levies() == 90,
-                        "server-owned levies are committed to army");
-                WorldPersistenceTest.check(marching.armies().stream()
-                        .anyMatch(army -> army.armyId().equals("send-army-01") && army.troops() == 10),
-                        "traveling army appears in sync");
+                Sync marching = alice.update(11, 321, 9000, List.of(sendArmy));
+                WorldPersistenceTest.check(!marching.results().getFirst().accepted()
+                        && "NOT_AT_WAR".equals(marching.results().getFirst().code())
+                        && marching.playerState().levies() == 100 && marching.armies().isEmpty(),
+                        "war preparation prevents premature attacks and preserves levies");
 
                 CrestDesign crest = CrestDesign.blank().withColor(1, 0x3366CC)
                         .withColor(2, 0xFFCC33).withPixel(0, 0, 1).withPixel(31, 31, 2);
                 Messages.Command setCrest = new Messages.Command("wire-crest-0001", "SET_CREST", "",
                         crest.pixelsEncoded(), 0, 0, crest.paletteHex());
-                Sync crestSaved = alice.update(11, 321, 9000, List.of(setCrest));
+                Sync crestSaved = alice.update(12, 321, 9000, List.of(setCrest));
                 WorldPersistenceTest.check(crestSaved.results().getFirst().accepted()
                                 && crestSaved.crests().stream().anyMatch(item -> item.hash().equals(crest.hash())),
                         "32x32 crest is accepted and synchronized to its owner over the wire");
-                Sync bobCrest = bob.update(8, 654, 8000, List.of());
+                Sync bobCrest = bob.update(9, 654, 8000, List.of());
                 WorldPersistenceTest.check(bobCrest.crests().stream().anyMatch(item ->
                                 item.playerId().equals("alice-id") && item.hash().equals(crest.hash())),
                         "16-color crest revision synchronizes to another live client");
@@ -144,6 +157,9 @@ public final class ServerIntegrationTest {
     private record Sync(Messages.WorldState world, Messages.PlayerState playerState,
             List<Messages.CommandResult> results, long eventCursor, List<Messages.WorldEvent> events,
             long crestCursor, List<Messages.Crest> crests,
+            List<Messages.House> houses, List<Messages.HouseMember> houseMembers,
+            List<Messages.HouseRequest> houseRequests, List<Messages.Province> provinces,
+            List<Messages.HouseWar> wars, List<Messages.BattleReport> reports, Messages.Season season,
             List<Messages.Relation> relations, List<Messages.Army> armies,
             List<Messages.Delivery> deliveries, List<Messages.MarketOffer> marketOffers) {
     }
@@ -217,6 +233,25 @@ public final class ServerIntegrationTest {
             for (int i = 0; i < crestsHeader.crestCount(); i++) {
                 crests.add(Messages.Crest.decode(LineIO.readLine(socket.getInputStream())));
             }
+            Messages.HousesHeader housesHeader = Messages.HousesHeader.decode(LineIO.readLine(socket.getInputStream()));
+            List<Messages.House> houses = new ArrayList<>();
+            for (int i = 0; i < housesHeader.houseCount(); i++) houses.add(Messages.House.decode(LineIO.readLine(socket.getInputStream())));
+            Messages.HouseMembersHeader membersHeader = Messages.HouseMembersHeader.decode(LineIO.readLine(socket.getInputStream()));
+            List<Messages.HouseMember> members = new ArrayList<>();
+            for (int i = 0; i < membersHeader.memberCount(); i++) members.add(Messages.HouseMember.decode(LineIO.readLine(socket.getInputStream())));
+            Messages.HouseRequestsHeader requestsHeader = Messages.HouseRequestsHeader.decode(LineIO.readLine(socket.getInputStream()));
+            List<Messages.HouseRequest> requests = new ArrayList<>();
+            for (int i = 0; i < requestsHeader.requestCount(); i++) requests.add(Messages.HouseRequest.decode(LineIO.readLine(socket.getInputStream())));
+            Messages.ProvincesHeader provincesHeader = Messages.ProvincesHeader.decode(LineIO.readLine(socket.getInputStream()));
+            List<Messages.Province> provinces = new ArrayList<>();
+            for (int i = 0; i < provincesHeader.provinceCount(); i++) provinces.add(Messages.Province.decode(LineIO.readLine(socket.getInputStream())));
+            Messages.WarsHeader warsHeader = Messages.WarsHeader.decode(LineIO.readLine(socket.getInputStream()));
+            List<Messages.HouseWar> wars = new ArrayList<>();
+            for (int i = 0; i < warsHeader.warCount(); i++) wars.add(Messages.HouseWar.decode(LineIO.readLine(socket.getInputStream())));
+            Messages.ReportsHeader reportsHeader = Messages.ReportsHeader.decode(LineIO.readLine(socket.getInputStream()));
+            List<Messages.BattleReport> reports = new ArrayList<>();
+            for (int i = 0; i < reportsHeader.reportCount(); i++) reports.add(Messages.BattleReport.decode(LineIO.readLine(socket.getInputStream())));
+            Messages.Season season = Messages.Season.decode(LineIO.readLine(socket.getInputStream()));
             Messages.RelationsHeader relationsHeader = Messages.RelationsHeader.decode(
                     LineIO.readLine(socket.getInputStream()));
             List<Messages.Relation> relations = new ArrayList<>();
@@ -245,6 +280,8 @@ public final class ServerIntegrationTest {
             }
             return new Sync(world, playerState, List.copyOf(results), eventsHeader.cursor(),
                     List.copyOf(events), crestsHeader.cursor(), List.copyOf(crests),
+                    List.copyOf(houses), List.copyOf(members), List.copyOf(requests),
+                    List.copyOf(provinces), List.copyOf(wars), List.copyOf(reports), season,
                     List.copyOf(relations), List.copyOf(armies),
                     List.copyOf(deliveries), List.copyOf(marketOffers));
         }

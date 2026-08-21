@@ -47,7 +47,9 @@ The authoritative file is `server-data/syx-kingdoms-world-v1.properties`. It
 contains player authentication hashes, city ownership, event history, diplomacy,
 server crowns/levies, founding profiles, real-time protection deadlines, traveling
 armies, shipments, and pending deliveries. The server also stores the public
-market order book and partial fills. It writes the
+market order book and partial fills, Houses, membership requests and roles,
+House/kingdom crests, all 100 provinces, formal wars, battle reports, and season
+state. It writes the
 world by temporary file plus atomic replacement and verifies the fixed world
 geometry and terrain fingerprint during startup. Live bans and mutes are stored in
 the sibling `moderation.properties` file.
@@ -67,7 +69,7 @@ join logs before reopening traffic.
 ## Operational minimums
 
 - Run exactly one writable authoritative instance.
-- Keep `FIXED_GAME_SPEED=1.0`; V0.9 rejects every other value on server startup
+- Keep `FIXED_GAME_SPEED=1.0`; V0.12 rejects every other value on server startup
   and every non-1x welcome on the client.
 - Keep `BEGINNER_PROTECTION_MILLIS=432000000` for the canonical five-day ruleset;
   changing it affects only kingdoms founded afterward.
@@ -75,7 +77,7 @@ join logs before reopening traffic.
 - Back up before every release or persistence migration.
 - Retain server logs and monitor rejected authentication, protocol, and rate-limit events.
 - Scrape or ship the five-minute `Status registered=...` line for basic population,
-  event, army, shipment, delivery, and market-offer monitoring.
+  event, army, shipment, delivery, market-offer, House, and war monitoring.
 - Use `tools/moderate-player.ps1 -Action Ban|Mute -PlayerId <id>` for live moderation;
   the server reloads `moderation.properties` within five seconds.
 - Stop the container gracefully so the Java shutdown hook performs a final save.

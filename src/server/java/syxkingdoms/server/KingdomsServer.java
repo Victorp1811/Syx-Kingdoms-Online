@@ -164,6 +164,19 @@ public final class KingdomsServer implements AutoCloseable {
         for (Messages.Crest crest : sync.crests()) {
             LineIO.writeLine(socket.getOutputStream(), crest.encode());
         }
+        LineIO.writeLine(socket.getOutputStream(), new Messages.HousesHeader(sync.houses().size()).encode());
+        for (Messages.House house : sync.houses()) LineIO.writeLine(socket.getOutputStream(), house.encode());
+        LineIO.writeLine(socket.getOutputStream(), new Messages.HouseMembersHeader(sync.houseMembers().size()).encode());
+        for (Messages.HouseMember member : sync.houseMembers()) LineIO.writeLine(socket.getOutputStream(), member.encode());
+        LineIO.writeLine(socket.getOutputStream(), new Messages.HouseRequestsHeader(sync.houseRequests().size()).encode());
+        for (Messages.HouseRequest request : sync.houseRequests()) LineIO.writeLine(socket.getOutputStream(), request.encode());
+        LineIO.writeLine(socket.getOutputStream(), new Messages.ProvincesHeader(sync.provinces().size()).encode());
+        for (Messages.Province province : sync.provinces()) LineIO.writeLine(socket.getOutputStream(), province.encode());
+        LineIO.writeLine(socket.getOutputStream(), new Messages.WarsHeader(sync.wars().size()).encode());
+        for (Messages.HouseWar war : sync.wars()) LineIO.writeLine(socket.getOutputStream(), war.encode());
+        LineIO.writeLine(socket.getOutputStream(), new Messages.ReportsHeader(sync.battleReports().size()).encode());
+        for (Messages.BattleReport report : sync.battleReports()) LineIO.writeLine(socket.getOutputStream(), report.encode());
+        LineIO.writeLine(socket.getOutputStream(), sync.season().encode());
         LineIO.writeLine(socket.getOutputStream(), new Messages.RelationsHeader(sync.relations().size()).encode());
         for (Messages.Relation relation : sync.relations()) {
             LineIO.writeLine(socket.getOutputStream(), relation.encode());
@@ -215,7 +228,9 @@ public final class KingdomsServer implements AutoCloseable {
                 + " armies=" + metrics.armies()
                 + " shipments=" + metrics.shipments()
                 + " deliveries=" + metrics.deliveries()
-                + " offers=" + metrics.marketOffers());
+                + " offers=" + metrics.marketOffers()
+                + " houses=" + metrics.houses()
+                + " wars=" + metrics.wars());
     }
 
     @Override

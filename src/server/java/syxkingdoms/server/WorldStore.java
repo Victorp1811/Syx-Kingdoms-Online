@@ -23,7 +23,11 @@ final class WorldStore {
     record LoadedWorld(long epochMillis, int nextSlot, List<PlayerRecord> players,
             long nextEventId, long nextCrestRevision, List<WorldEventRecord> events, List<ArmyRecord> armies,
             List<ShipmentRecord> shipments, List<DeliveryRecord> deliveries,
-            List<MarketOfferRecord> marketOffers) {
+            List<MarketOfferRecord> marketOffers, List<HouseRecord> houses,
+            List<HouseRequestRecord> houseRequests, List<ProvinceRecord> provinces,
+            List<HouseWarRecord> wars, List<BattleReportRecord> reports,
+            int seasonNumber, long seasonStartsEpochMillis, long seasonEndsEpochMillis,
+            String seasonWinnerHouseId) {
     }
 
     private WorldStore() {
@@ -31,8 +35,11 @@ final class WorldStore {
 
     static LoadedWorld load(Path path, ServerConfig config) throws IOException {
         if (!Files.exists(path)) {
-            return new LoadedWorld(System.currentTimeMillis(), 0, List.of(), 1, 1,
-                    List.of(), List.of(), List.of(), List.of(), List.of());
+            long now = System.currentTimeMillis();
+            return new LoadedWorld(now, 0, List.of(), 1, 1,
+                    List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
+                    List.of(), List.of(), List.of(), List.of(), 1, now,
+                    now + 30L * 86_400_000L, "");
         }
         Properties p = new Properties();
         try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
@@ -43,7 +50,7 @@ final class WorldStore {
             throw new IOException("World file belongs to '" + storedWorldId + "', not '" + config.worldId() + "'");
         }
         int format = Integer.parseInt(p.getProperty("format", "1"));
-        if (format > 9) {
+        if (format > 12) {
             throw new IOException("World file format " + format + " is newer than this server supports");
         }
         if (format >= 2) {
@@ -94,6 +101,10 @@ final class WorldStore {
                     p.getProperty(prefix + "economyUpdated", Long.toString(System.currentTimeMillis())));
             player.levyProgressMinutes = Integer.parseInt(p.getProperty(prefix + "levyProgressMinutes", "0"));
             player.crestRevision = Long.parseLong(p.getProperty(prefix + "crestRevision", "0"));
+            player.houseId = decode(p.getProperty(prefix + "houseId", ""), "player house ID");
+            player.houseRole = p.getProperty(prefix + "houseRole", "");
+            player.houseJoinedEpochMillis = Long.parseLong(p.getProperty(prefix + "houseJoined", "0"));
+            player.houseEligibleEpochMillis = Long.parseLong(p.getProperty(prefix + "houseEligible", "0"));
             String crestPixels = decode(p.getProperty(prefix + "crestPixels", ""), "crest pixels");
             String crestPalette = decode(p.getProperty(prefix + "crestPalette", ""), "crest palette");
             if (player.crestRevision == 0) {
@@ -157,7 +168,9 @@ final class WorldStore {
                     decode(required(p, prefix + "targetId"), "army target ID"),
                     Integer.parseInt(required(p, prefix + "troops")),
                     Long.parseLong(required(p, prefix + "departed")),
-                    Long.parseLong(required(p, prefix + "arrives"))));
+                    Long.parseLong(required(p, prefix + "arrives")),
+                    p.getProperty(prefix + "mission", "ATTACK"),
+                    decode(p.getProperty(prefix + "warId", ""), "army war ID")));
         }
         int shipmentCount = boundedCount(p, "shipments.count", Protocol.MAX_DELIVERIES_PER_SYNC);
         List<ShipmentRecord> shipments = new ArrayList<>(shipmentCount);
@@ -196,18 +209,112 @@ final class WorldStore {
                     Long.parseLong(required(p, prefix + "unitPrice")),
                     Long.parseLong(required(p, prefix + "created"))));
         }
+        int houseCount = boundedCount(p, "houses.count", Protocol.MAX_HOUSES_PER_SYNC);
+        List<HouseRecord> houses = new ArrayList<>(houseCount);
+        for (int i = 0; i < houseCount; i++) {
+            String prefix = "house." + i + ".";
+            HouseRecord house = new HouseRecord(decode(required(p, prefix + "id"), "house ID"),
+                    decode(required(p, prefix + "name"), "house name"),
+                    required(p, prefix + "tag"),
+                    decode(required(p, prefix + "sovereignId"), "house sovereign"),
+                    Long.parseLong(required(p, prefix + "created")));
+            house.announcement = decode(p.getProperty(prefix + "announcement", ""), "house announcement");
+            house.capitalProvinceX = Integer.parseInt(p.getProperty(prefix + "capitalX", "-1"));
+            house.capitalProvinceY = Integer.parseInt(p.getProperty(prefix + "capitalY", "-1"));
+            house.seasonPoints = Integer.parseInt(p.getProperty(prefix + "seasonPoints", "0"));
+            house.crestRevision = Long.parseLong(p.getProperty(prefix + "crestRevision", "0"));
+            String pixels = decode(p.getProperty(prefix + "crestPixels", ""), "house crest pixels");
+            String palette = decode(p.getProperty(prefix + "crestPalette", ""), "house crest palette");
+            if (house.crestRevision > 0) {
+                try {
+                    house.crest = CrestDesign.decode(pixels, palette);
+                } catch (ProtocolException e) {
+                    throw new IOException("Invalid crest for House " + house.houseId, e);
+                }
+            }
+            houses.add(house);
+        }
+        int requestCount = boundedCount(p, "houseRequests.count", Protocol.MAX_HOUSE_REQUESTS_PER_SYNC);
+        List<HouseRequestRecord> houseRequests = new ArrayList<>(requestCount);
+        for (int i = 0; i < requestCount; i++) {
+            String prefix = "houseRequest." + i + ".";
+            houseRequests.add(new HouseRequestRecord(
+                    decode(required(p, prefix + "id"), "house request ID"),
+                    decode(required(p, prefix + "houseId"), "request house ID"),
+                    decode(required(p, prefix + "playerId"), "request player ID"),
+                    required(p, prefix + "type"), Long.parseLong(required(p, prefix + "created")),
+                    Long.parseLong(required(p, prefix + "expires"))));
+        }
+        int provinceCount = boundedCount(p, "provinces.count", Protocol.MAX_PROVINCES_PER_SYNC);
+        List<ProvinceRecord> provinces = new ArrayList<>(provinceCount);
+        for (int i = 0; i < provinceCount; i++) {
+            String prefix = "province." + i + ".";
+            ProvinceRecord province = new ProvinceRecord(Integer.parseInt(required(p, prefix + "x")),
+                    Integer.parseInt(required(p, prefix + "y")));
+            province.ownerHouseId = decode(p.getProperty(prefix + "ownerHouseId", ""), "province owner");
+            province.occupierHouseId = decode(p.getProperty(prefix + "occupierHouseId", ""), "province occupier");
+            province.occupationInfluence = Integer.parseInt(p.getProperty(prefix + "influence", "0"));
+            province.blockadeEndsEpochMillis = Long.parseLong(p.getProperty(prefix + "blockadeEnds", "0"));
+            province.tributeCrowns = Long.parseLong(p.getProperty(prefix + "tribute", "0"));
+            province.lastTributeEpochMillis = Long.parseLong(p.getProperty(prefix + "lastTribute", "0"));
+            provinces.add(province);
+        }
+        int warCount = boundedCount(p, "wars.count", Protocol.MAX_WARS_PER_SYNC);
+        List<HouseWarRecord> wars = new ArrayList<>(warCount);
+        for (int i = 0; i < warCount; i++) {
+            String prefix = "war." + i + ".";
+            HouseWarRecord war = new HouseWarRecord(decode(required(p, prefix + "id"), "war ID"),
+                    decode(required(p, prefix + "attackerHouseId"), "attacker House"),
+                    decode(required(p, prefix + "defenderHouseId"), "defender House"),
+                    Long.parseLong(required(p, prefix + "declared")),
+                    Long.parseLong(required(p, prefix + "starts")),
+                    Long.parseLong(required(p, prefix + "ends")), required(p, prefix + "phase"));
+            war.attackerScore = Integer.parseInt(p.getProperty(prefix + "attackerScore", "0"));
+            war.defenderScore = Integer.parseInt(p.getProperty(prefix + "defenderScore", "0"));
+            war.truceEndsEpochMillis = Long.parseLong(p.getProperty(prefix + "truceEnds", "0"));
+            war.surrenderedHouseId = decode(p.getProperty(prefix + "surrenderedHouseId", ""), "surrendered House");
+            wars.add(war);
+        }
+        int reportCount = boundedCount(p, "reports.count", Protocol.MAX_REPORTS_PER_SYNC);
+        List<BattleReportRecord> reports = new ArrayList<>(reportCount);
+        for (int i = 0; i < reportCount; i++) {
+            String prefix = "report." + i + ".";
+            reports.add(new BattleReportRecord(decode(required(p, prefix + "id"), "report ID"),
+                    Long.parseLong(required(p, prefix + "epochMillis")),
+                    decode(required(p, prefix + "attackerId"), "report attacker"),
+                    decode(required(p, prefix + "defenderId"), "report defender"),
+                    decode(p.getProperty(prefix + "warId", ""), "report war ID"),
+                    required(p, prefix + "outcome"), Integer.parseInt(required(p, prefix + "attacking")),
+                    Integer.parseInt(required(p, prefix + "defending")),
+                    Integer.parseInt(required(p, prefix + "attackerSurvivors")),
+                    Integer.parseInt(required(p, prefix + "defenderSurvivors")),
+                    Long.parseLong(required(p, prefix + "loot")),
+                    Integer.parseInt(required(p, prefix + "provinceX")),
+                    Integer.parseInt(required(p, prefix + "provinceY")),
+                    Integer.parseInt(required(p, prefix + "warScore"))));
+        }
+        long defaultSeasonStart = System.currentTimeMillis();
         return new LoadedWorld(epoch, nextSlot, List.copyOf(players), nextEventId, nextCrestRevision,
                 List.copyOf(events), List.copyOf(armies), List.copyOf(shipments),
-                List.copyOf(deliveries), List.copyOf(offers));
+                List.copyOf(deliveries), List.copyOf(offers), List.copyOf(houses),
+                List.copyOf(houseRequests), List.copyOf(provinces), List.copyOf(wars),
+                List.copyOf(reports), Integer.parseInt(p.getProperty("season.number", "1")),
+                Long.parseLong(p.getProperty("season.starts", Long.toString(defaultSeasonStart))),
+                Long.parseLong(p.getProperty("season.ends", Long.toString(defaultSeasonStart + 30L * 86_400_000L))),
+                decode(p.getProperty("season.winnerHouseId", ""), "season winner House"));
     }
 
     static void save(Path path, ServerConfig config, long epochMillis, int nextSlot,
             List<PlayerRecord> input, long nextEventId, long nextCrestRevision,
             List<WorldEventRecord> inputEvents,
             List<ArmyRecord> inputArmies, List<ShipmentRecord> inputShipments,
-            List<DeliveryRecord> inputDeliveries, List<MarketOfferRecord> inputOffers) throws IOException {
+            List<DeliveryRecord> inputDeliveries, List<MarketOfferRecord> inputOffers,
+            List<HouseRecord> inputHouses, List<HouseRequestRecord> inputHouseRequests,
+            List<ProvinceRecord> inputProvinces, List<HouseWarRecord> inputWars,
+            List<BattleReportRecord> inputReports, int seasonNumber, long seasonStartsEpochMillis,
+            long seasonEndsEpochMillis, String seasonWinnerHouseId) throws IOException {
         Properties p = new Properties();
-        p.setProperty("format", "9");
+        p.setProperty("format", "12");
         p.setProperty("world.id", config.worldId());
         p.setProperty("world.epochMillis", Long.toString(epochMillis));
         p.setProperty("world.nextSlot", Integer.toString(nextSlot));
@@ -248,6 +355,10 @@ final class WorldStore {
                     player.crest == null ? "" : player.crest.pixelsEncoded()));
             p.setProperty(prefix + "crestPalette", Protocol.encodeText(
                     player.crest == null ? "" : player.crest.paletteHex()));
+            p.setProperty(prefix + "houseId", Protocol.encodeText(orEmpty(player.houseId)));
+            p.setProperty(prefix + "houseRole", orEmpty(player.houseRole));
+            p.setProperty(prefix + "houseJoined", Long.toString(player.houseJoinedEpochMillis));
+            p.setProperty(prefix + "houseEligible", Long.toString(player.houseEligibleEpochMillis));
         }
         List<WorldEventRecord> events = new ArrayList<>(inputEvents);
         events.sort(Comparator.comparingLong(event -> event.eventId));
@@ -280,6 +391,8 @@ final class WorldStore {
             p.setProperty(prefix + "troops", Integer.toString(army.troops));
             p.setProperty(prefix + "departed", Long.toString(army.departedEpochMillis));
             p.setProperty(prefix + "arrives", Long.toString(army.arrivesEpochMillis));
+            p.setProperty(prefix + "mission", army.mission);
+            p.setProperty(prefix + "warId", Protocol.encodeText(orEmpty(army.warId)));
         }
         List<ShipmentRecord> shipments = new ArrayList<>(inputShipments);
         shipments.sort(Comparator.comparingLong(shipment -> shipment.arrivesEpochMillis));
@@ -321,6 +434,88 @@ final class WorldStore {
             p.setProperty(prefix + "unitPrice", Long.toString(offer.unitPrice));
             p.setProperty(prefix + "created", Long.toString(offer.createdEpochMillis));
         }
+        List<HouseRecord> houses = new ArrayList<>(inputHouses);
+        houses.sort(Comparator.comparing(house -> house.houseId));
+        p.setProperty("houses.count", Integer.toString(houses.size()));
+        for (int i = 0; i < houses.size(); i++) {
+            HouseRecord house = houses.get(i);
+            String prefix = "house." + i + ".";
+            p.setProperty(prefix + "id", Protocol.encodeText(house.houseId));
+            p.setProperty(prefix + "name", Protocol.encodeText(house.name));
+            p.setProperty(prefix + "tag", house.tag);
+            p.setProperty(prefix + "sovereignId", Protocol.encodeText(house.sovereignPlayerId));
+            p.setProperty(prefix + "created", Long.toString(house.createdEpochMillis));
+            p.setProperty(prefix + "announcement", Protocol.encodeText(orEmpty(house.announcement)));
+            p.setProperty(prefix + "capitalX", Integer.toString(house.capitalProvinceX));
+            p.setProperty(prefix + "capitalY", Integer.toString(house.capitalProvinceY));
+            p.setProperty(prefix + "seasonPoints", Integer.toString(house.seasonPoints));
+            p.setProperty(prefix + "crestRevision", Long.toString(house.crestRevision));
+            p.setProperty(prefix + "crestPixels", Protocol.encodeText(house.crest == null ? "" : house.crest.pixelsEncoded()));
+            p.setProperty(prefix + "crestPalette", Protocol.encodeText(house.crest == null ? "" : house.crest.paletteHex()));
+        }
+        p.setProperty("houseRequests.count", Integer.toString(inputHouseRequests.size()));
+        for (int i = 0; i < inputHouseRequests.size(); i++) {
+            HouseRequestRecord request = inputHouseRequests.get(i);
+            String prefix = "houseRequest." + i + ".";
+            p.setProperty(prefix + "id", Protocol.encodeText(request.requestId));
+            p.setProperty(prefix + "houseId", Protocol.encodeText(request.houseId));
+            p.setProperty(prefix + "playerId", Protocol.encodeText(request.playerId));
+            p.setProperty(prefix + "type", request.type);
+            p.setProperty(prefix + "created", Long.toString(request.createdEpochMillis));
+            p.setProperty(prefix + "expires", Long.toString(request.expiresEpochMillis));
+        }
+        p.setProperty("provinces.count", Integer.toString(inputProvinces.size()));
+        for (int i = 0; i < inputProvinces.size(); i++) {
+            ProvinceRecord province = inputProvinces.get(i);
+            String prefix = "province." + i + ".";
+            p.setProperty(prefix + "x", Integer.toString(province.x));
+            p.setProperty(prefix + "y", Integer.toString(province.y));
+            p.setProperty(prefix + "ownerHouseId", Protocol.encodeText(orEmpty(province.ownerHouseId)));
+            p.setProperty(prefix + "occupierHouseId", Protocol.encodeText(orEmpty(province.occupierHouseId)));
+            p.setProperty(prefix + "influence", Integer.toString(province.occupationInfluence));
+            p.setProperty(prefix + "blockadeEnds", Long.toString(province.blockadeEndsEpochMillis));
+            p.setProperty(prefix + "tribute", Long.toString(province.tributeCrowns));
+            p.setProperty(prefix + "lastTribute", Long.toString(province.lastTributeEpochMillis));
+        }
+        p.setProperty("wars.count", Integer.toString(inputWars.size()));
+        for (int i = 0; i < inputWars.size(); i++) {
+            HouseWarRecord war = inputWars.get(i);
+            String prefix = "war." + i + ".";
+            p.setProperty(prefix + "id", Protocol.encodeText(war.warId));
+            p.setProperty(prefix + "attackerHouseId", Protocol.encodeText(war.attackerHouseId));
+            p.setProperty(prefix + "defenderHouseId", Protocol.encodeText(war.defenderHouseId));
+            p.setProperty(prefix + "declared", Long.toString(war.declaredEpochMillis));
+            p.setProperty(prefix + "starts", Long.toString(war.startsEpochMillis));
+            p.setProperty(prefix + "ends", Long.toString(war.endsEpochMillis));
+            p.setProperty(prefix + "phase", war.phase);
+            p.setProperty(prefix + "attackerScore", Integer.toString(war.attackerScore));
+            p.setProperty(prefix + "defenderScore", Integer.toString(war.defenderScore));
+            p.setProperty(prefix + "truceEnds", Long.toString(war.truceEndsEpochMillis));
+            p.setProperty(prefix + "surrenderedHouseId", Protocol.encodeText(orEmpty(war.surrenderedHouseId)));
+        }
+        p.setProperty("reports.count", Integer.toString(inputReports.size()));
+        for (int i = 0; i < inputReports.size(); i++) {
+            BattleReportRecord report = inputReports.get(i);
+            String prefix = "report." + i + ".";
+            p.setProperty(prefix + "id", Protocol.encodeText(report.reportId));
+            p.setProperty(prefix + "epochMillis", Long.toString(report.epochMillis));
+            p.setProperty(prefix + "attackerId", Protocol.encodeText(report.attackerPlayerId));
+            p.setProperty(prefix + "defenderId", Protocol.encodeText(report.defenderPlayerId));
+            p.setProperty(prefix + "warId", Protocol.encodeText(orEmpty(report.warId)));
+            p.setProperty(prefix + "outcome", report.outcome);
+            p.setProperty(prefix + "attacking", Integer.toString(report.attackingTroops));
+            p.setProperty(prefix + "defending", Integer.toString(report.defendingTroops));
+            p.setProperty(prefix + "attackerSurvivors", Integer.toString(report.attackerSurvivors));
+            p.setProperty(prefix + "defenderSurvivors", Integer.toString(report.defenderSurvivors));
+            p.setProperty(prefix + "loot", Long.toString(report.crownsLooted));
+            p.setProperty(prefix + "provinceX", Integer.toString(report.provinceX));
+            p.setProperty(prefix + "provinceY", Integer.toString(report.provinceY));
+            p.setProperty(prefix + "warScore", Integer.toString(report.warScore));
+        }
+        p.setProperty("season.number", Integer.toString(seasonNumber));
+        p.setProperty("season.starts", Long.toString(seasonStartsEpochMillis));
+        p.setProperty("season.ends", Long.toString(seasonEndsEpochMillis));
+        p.setProperty("season.winnerHouseId", Protocol.encodeText(orEmpty(seasonWinnerHouseId)));
 
         Path parent = path.toAbsolutePath().getParent();
         if (parent != null) {

@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 public final class Protocol {
-    public static final int VERSION = 6;
+    public static final int VERSION = 9;
     public static final int MAX_LINE_BYTES = 64 * 1024;
     public static final int MAX_TEXT_BYTES = 1024;
     public static final int MAX_CITIES_PER_STATE = 2048;
@@ -15,6 +15,12 @@ public final class Protocol {
     public static final int MAX_DELIVERIES_PER_SYNC = 64;
     public static final int MAX_MARKET_OFFERS_PER_SYNC = 64;
     public static final int MAX_CRESTS_PER_SYNC = 128;
+    public static final int MAX_HOUSES_PER_SYNC = 256;
+    public static final int MAX_HOUSE_MEMBERS_PER_SYNC = 2048;
+    public static final int MAX_HOUSE_REQUESTS_PER_SYNC = 64;
+    public static final int MAX_PROVINCES_PER_SYNC = 100;
+    public static final int MAX_WARS_PER_SYNC = 128;
+    public static final int MAX_REPORTS_PER_SYNC = 64;
 
     private Protocol() {
     }
