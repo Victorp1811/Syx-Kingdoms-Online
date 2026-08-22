@@ -9,6 +9,7 @@ import syxkingdoms.protocol.SharedWorldTerrain;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
@@ -19,13 +20,10 @@ public final class WorldPersistenceTest {
         Path temp = Files.createTempDirectory("syx-kingdoms-world-test-");
         ServerConfig config = config(temp.resolve("world.properties"));
         SharedWorldTerrain terrain = new SharedWorldTerrain(config.worldSeed());
-        check(config.worldWidth() == SharedWorld.BASE_GAME_TILE_DIMENSION * SharedWorld.LINEAR_SCALE,
-                "shared world is ten base maps wide");
-        check(config.worldHeight() == SharedWorld.BASE_GAME_TILE_DIMENSION * SharedWorld.LINEAR_SCALE,
-                "shared world is ten base maps tall");
-        check((long) config.worldWidth() * config.worldHeight()
-                == (long) SharedWorld.BASE_GAME_TILE_DIMENSION * SharedWorld.BASE_GAME_TILE_DIMENSION * 100L,
-                "shared world contains one hundred base-map areas");
+        check(config.worldWidth() == 1000 && config.worldHeight() == 1000,
+                "shared world uses the stable canonical 1000-square geometry");
+        check(SharedWorld.SECTOR_COUNT == 100 && SharedWorld.PROVINCE_TILE_DIMENSION == 100,
+                "shared world keeps one hundred strategic provinces");
         String tokenA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         String tokenB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -35,6 +33,8 @@ public final class WorldPersistenceTest {
         check(alice.player().x >= 0 && alice.player().x < config.worldWidth(), "first city x bound");
         check(alice.player().y >= 0 && alice.player().y < config.worldHeight(), "first city y bound");
         check(alice.player().x != bob.player().x || alice.player().y != bob.player().y, "distinct city slots");
+        check(distanceSquared(alice.player(), bob.player()) >= (long) SharedWorld.PLAYER_CITY_MIN_DISTANCE
+                * SharedWorld.PLAYER_CITY_MIN_DISTANCE, "player cities receive isolated founding clusters");
         check(alice.player().x % config.citySpacing() == 0 && alice.player().y % config.citySpacing() == 0,
                 "first city spacing");
         check(terrain.canFoundCity(alice.player().x, alice.player().y), "first city is on buildable land");
@@ -75,7 +75,9 @@ public final class WorldPersistenceTest {
         long shipmentArrival = social.events().stream()
                 .filter(event -> "SHIPMENT_SENT".equals(event.type()))
                 .mapToLong(Messages.WorldEvent::value2).findFirst().orElseThrow();
-        check(world.snapshot().cities().size() == 2, "two city snapshot");
+        check(world.snapshot().cities().size() == 8, "two players plus six nearby NPC cities in snapshot");
+        check(world.snapshot().cities().stream().filter(WorldPersistenceTest::isNpc).count() == 6,
+                "exactly three neutral cities exist per player");
         check(world.snapshot().cities().stream().filter(Messages.City::online).count() == 2, "online snapshot");
         world.leave("alice-id");
         world.leave("bob-id");
@@ -84,7 +86,8 @@ public final class WorldPersistenceTest {
         try (var reader = Files.newBufferedReader(config.worldFile())) {
             persisted.load(reader);
         }
-        check("12".equals(persisted.getProperty("format")), "persistent world format");
+        check("13".equals(persisted.getProperty("format")), "persistent world format");
+        check("6".equals(persisted.getProperty("npcs.count")), "NPC cities persist in the world file");
         check(Integer.toString(SharedWorld.TERRAIN_GENERATION)
                 .equals(persisted.getProperty("world.terrainGeneration")), "persistent terrain generation");
         check(terrain.fingerprint().equals(persisted.getProperty("world.terrainFingerprint")),
@@ -172,8 +175,8 @@ public final class WorldPersistenceTest {
         } catch (ProtocolException expected) {
             check("MOD_VERSION_MISMATCH".equals(expected.code()), "mod-version error code");
         }
-        Messages.Hello extraMod = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0|Example Mod@1.0.0", 0, 0, SharedWorld.WORLD_ID, "modded-client",
+        Messages.Hello extraMod = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0|Example Mod@1.0.0", 0, 0, SharedWorld.WORLD_ID, "modded-client",
                 "dddddddddddddddddddddddddddddddd", "Modded Ruler", "Modded Realm", "Modded City", "");
         try {
             reloaded.join(extraMod);
@@ -193,65 +196,61 @@ public final class WorldPersistenceTest {
         }
         verifyCoordinateAllocation(temp.resolve("coordinates.properties"));
         verifyFoundingAndProtection(temp.resolve("founding.properties"));
+        verifyRequestedFoundingReload(temp.resolve("requested-founding.properties"));
         verifyLocalChat(temp.resolve("local-chat.properties"));
         verifyCrests(temp.resolve("crests.properties"));
         verifyLegacyFoundingMigration(temp.resolve("legacy-founding.properties"));
+        verify2560GeometryMigration(temp.resolve("geometry-migration.properties"));
         verifyModeration(temp.resolve("moderated"));
         System.out.println("WorldPersistenceTest: PASS");
     }
 
     private static void verifyLocalChat(Path worldFile) throws Exception {
-        World world = new World(config(worldFile));
+        ServerConfig localConfig = config(worldFile);
+        World world = new World(localConfig);
         String actorId = "local-actor";
         String actorToken = "77777777777777777777777777777777";
         World.JoinResult actor = world.join(hello(actorId, actorToken, "Province Herald", "Herald's Rest"));
 
         World.JoinResult neighbor = null;
-        for (int i = 0; i < 20 && neighbor == null; i++) {
+        for (int i = 0; i < localConfig.maxPlayers() - 2 && neighbor == null; i++) {
             String id = "local-neighbor-" + i;
-            Messages.Hello base = hello(id, String.format("%032d", 8_000 + i),
-                    "Neighbor " + i, "Neighbor City " + i);
-            Messages.Hello nearby = new Messages.Hello(base.protocolVersion(), base.gameVersion(),
-                    base.modVersion(), base.modManifest(), base.lastEventId(), base.lastCrestRevision(), base.worldId(),
-                    base.playerId(), base.authToken(), base.playerName(), base.kingdomName(), base.cityName(),
-                    actor.player().kingdomName);
-            World.JoinResult candidate = world.join(nearby);
-            if (SharedWorld.sectorX(candidate.player().x) == SharedWorld.sectorX(actor.player().x)
-                    && SharedWorld.sectorY(candidate.player().y) == SharedWorld.sectorY(actor.player().y)) {
+            World.JoinResult candidate = world.join(hello(id, String.format("%032d", 8_000 + i),
+                    "Neighbor " + i, "Neighbor City " + i));
+            if (withinLocalChat(actor.player(), candidate.player())) {
                 neighbor = candidate;
             }
         }
-        check(neighbor != null, "social placement supplies a listener in the actor's local province");
+        check(neighbor != null, "isolated allocation still supplies a nearby local-chat listener");
 
         World.JoinResult distant = null;
         for (int i = 0; i < 100 && distant == null; i++) {
             String id = "distant-listener-" + i;
             World.JoinResult candidate = world.join(hello(id, String.format("%032d", 9_000 + i),
                     "Distant " + i, "Distant City " + i));
-            if (SharedWorld.sectorX(candidate.player().x) != SharedWorld.sectorX(actor.player().x)
-                    || SharedWorld.sectorY(candidate.player().y) != SharedWorld.sectorY(actor.player().y)) {
+            if (!withinLocalChat(actor.player(), candidate.player())) {
                 distant = candidate;
             }
         }
-        check(distant != null, "balanced placement supplies a listener outside the actor's local province");
+        check(distant != null, "balanced placement supplies a listener outside local-chat range");
 
+        long actorCursor = drainEventCursor(world, actorId);
         Messages.Command localChat = new Messages.Command("local-chat-0001", "LOCAL_CHAT", "", "",
                 0, 0, "Neighbors, the market is open");
         World.SyncResult actorLocal = world.applyUpdate(actorId,
-                new Messages.ClientUpdate(1, 0, 0, 0, 0, List.of(localChat)));
+                new Messages.ClientUpdate(1, 0, 0, actorCursor, 0, List.of(localChat)));
         check(actorLocal.commandResults().getFirst().accepted()
                         && "LOCAL_MESSAGE_SENT".equals(actorLocal.commandResults().getFirst().code()),
                 "local chat command accepted");
         check(actorLocal.events().stream().anyMatch(event -> "LOCAL_CHAT".equals(event.type())
                         && "Province Herald".equals(event.actorName())),
                 "local chat is stamped with the server-owned chosen ruler name");
-        World.SyncResult neighborLocal = world.initialSync(neighbor.player().playerId, 0);
-        check(neighborLocal.events().stream().anyMatch(event -> "LOCAL_CHAT".equals(event.type())
+        check(hasVisibleEvent(world, neighbor.player().playerId, event -> "LOCAL_CHAT".equals(event.type())
                         && "Neighbors, the market is open".equals(event.text())),
-                "local chat is visible within the sender's 256-by-256 province");
-        World.SyncResult distantLocal = world.initialSync(distant.player().playerId, 0);
-        check(distantLocal.events().stream().noneMatch(event -> "LOCAL_CHAT".equals(event.type())),
-                "local chat is hidden outside the sender's province");
+                "local chat is visible within the sender's local radius");
+        check(!hasVisibleEvent(world, distant.player().playerId, event -> "LOCAL_CHAT".equals(event.type())),
+                "local chat is hidden outside the sender's local radius");
+        long distantCursor = drainEventCursor(world, distant.player().playerId);
 
         world.leave(actorId);
         world.join(hello(actorId, actorToken, "Spoofed Name", "Spoofed Capital"));
@@ -259,7 +258,7 @@ public final class WorldPersistenceTest {
                 0, 0, "This one reaches every province");
         world.applyUpdate(actorId, new Messages.ClientUpdate(2, 0, 0,
                 actorLocal.eventCursor(), 0, List.of(globalChat)));
-        World.SyncResult distantGlobal = world.initialSync(distant.player().playerId, distantLocal.eventCursor());
+        World.SyncResult distantGlobal = world.initialSync(distant.player().playerId, distantCursor);
         check(distantGlobal.events().stream().anyMatch(event -> "CHAT".equals(event.type())
                         && "Province Herald".equals(event.actorName())
                         && "This one reaches every province".equals(event.text())),
@@ -342,10 +341,17 @@ public final class WorldPersistenceTest {
         World world = new World(config);
         SharedWorldTerrain terrain = new SharedWorldTerrain(config.worldSeed());
         Set<String> coordinates = new HashSet<>();
+        List<PlayerRecord> allocated = new ArrayList<>();
         for (int i = 0; i < config.maxPlayers(); i++) {
             String id = "player-" + i;
             String token = String.format("%032d", i);
-            World.JoinResult joined = world.join(hello(id, token, "Ruler " + i, "City " + i));
+            World.JoinResult joined;
+            try {
+                joined = world.join(hello(id, token, "Ruler " + i, "City " + i));
+            } catch (ProtocolException e) {
+                throw new AssertionError("cluster allocation failed at player " + i
+                        + " of configured capacity " + config.maxPlayers(), e);
+            }
             PlayerRecord player = joined.player();
             check(player.x >= 0 && player.x < config.worldWidth(), "allocated x bound");
             check(player.y >= 0 && player.y < config.worldHeight(), "allocated y bound");
@@ -353,15 +359,36 @@ public final class WorldPersistenceTest {
                     "allocated spacing");
             check(terrain.canFoundCity(player.x, player.y), "allocated city is on buildable land");
             check(coordinates.add(player.x + "," + player.y), "allocated coordinate uniqueness");
+            for (PlayerRecord other : allocated) {
+                check(distanceSquared(player, other) >= (long) SharedWorld.PLAYER_CITY_MIN_DISTANCE
+                        * SharedWorld.PLAYER_CITY_MIN_DISTANCE, "allocated player minimum distance");
+            }
+            allocated.add(player);
+            List<Messages.City> nearbyNpcs = world.snapshot().cities().stream()
+                    .filter(city -> city.playerId().startsWith("npc-" + id + "-")).toList();
+            check(nearbyNpcs.size() == SharedWorld.NPC_CITIES_PER_PLAYER,
+                    "each allocated player receives three NPC cities");
+            for (Messages.City npc : nearbyNpcs) {
+                check(npc.cityName().startsWith(player.cityName + " "),
+                        "NPC city name is derived from its patron capital");
+                long distance = distanceSquared(player.x, player.y, npc.x(), npc.y());
+                check(distance >= (long) SharedWorld.NPC_CITY_MIN_DISTANCE * SharedWorld.NPC_CITY_MIN_DISTANCE
+                                && distance <= (long) SharedWorld.NPC_CITY_MAX_DISTANCE
+                                * SharedWorld.NPC_CITY_MAX_DISTANCE,
+                        "NPC city is inside its player's nearby ring");
+                check(coordinates.add(npc.x() + "," + npc.y()), "NPC coordinate uniqueness");
+            }
             world.leave(id);
         }
+        check(world.snapshot().cities().size() == config.maxPlayers()
+                * (SharedWorld.NPC_CITIES_PER_PLAYER + 1), "full allocation preserves four-city clusters");
     }
 
     private static void verifyFoundingAndProtection(Path worldFile) throws Exception {
         ServerConfig protectedConfig = config(worldFile, 432_000_000L);
         World world = new World(protectedConfig);
-        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "blank-player",
+        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0", 0, 0, SharedWorld.WORLD_ID, "blank-player",
                 "11111111111111111111111111111111", "", "", "", "");
         try {
             world.join(blank);
@@ -375,8 +402,8 @@ public final class WorldPersistenceTest {
                 "First Ruler", "First Capital"));
         check(first.player().protectionEndsEpochMillis > System.currentTimeMillis(),
                 "new kingdom receives beginner protection");
-        Messages.Hello duplicateKingdom = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "duplicate-player",
+        Messages.Hello duplicateKingdom = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0", 0, 0, SharedWorld.WORLD_ID, "duplicate-player",
                 "22222222222222222222222222222222", "Second Ruler", first.player().kingdomName,
                 "Second Capital", "");
         try {
@@ -386,31 +413,41 @@ public final class WorldPersistenceTest {
             check("KINGDOM_NAME_TAKEN".equals(expected.code()), "duplicate-kingdom error code");
             check(world.metrics().registeredPlayers() == 1, "duplicate name consumes no player slot");
         }
-        Messages.Hello unknownPlacement = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "unknown-neighbor",
+        Messages.Hello unknownPlacement = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0", 0, 0, SharedWorld.WORLD_ID, "unknown-neighbor",
                 "44444444444444444444444444444444", "Neighbor Ruler", "Neighbor Realm",
                 "Neighbor Capital", "Missing Realm");
         try {
             world.join(unknownPlacement);
-            throw new AssertionError("unknown placement reference should be rejected");
+            throw new AssertionError("invalid founding coordinate should be rejected");
         } catch (ProtocolException expected) {
-            check("PLACEMENT_REFERENCE_NOT_FOUND".equals(expected.code()), "unknown-placement error code");
+            check("FOUNDING_LOCATION_INVALID".equals(expected.code()), "invalid-location error code");
             check(world.metrics().registeredPlayers() == 1, "unknown placement consumes no player slot");
         }
 
         World.JoinResult second = world.join(hello("second-player", "22222222222222222222222222222222",
                 "Second Ruler", "Second Capital"));
-        Messages.Hello nearbyHello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "nearby-player",
-                "44444444444444444444444444444444", "Nearby Ruler", "Nearby Realm",
-                "Nearby Capital", first.player().kingdomName);
-        World.JoinResult nearby = world.join(nearbyHello);
-        long nearbyDx = (long) nearby.player().x - first.player().x;
-        long nearbyDy = (long) nearby.player().y - first.player().y;
-        check(nearbyDx * nearbyDx + nearbyDy * nearbyDy <= 2L * protectedConfig.citySpacing()
-                        * protectedConfig.citySpacing(),
-                "social placement chooses an immediately nearby buildable coordinate");
-        world.leave("nearby-player");
+        check(distanceSquared(first.player(), second.player()) >= (long) SharedWorld.PLAYER_CITY_MIN_DISTANCE
+                        * SharedWorld.PLAYER_CITY_MIN_DISTANCE,
+                "automatic founding keeps kingdoms outside the player exclusion radius");
+
+        Messages.City neutral = world.snapshot().cities().stream()
+                .filter(city -> city.playerId().startsWith("npc-first-player-")).findFirst().orElseThrow();
+        long protectionBeforePve = first.player().protectionEndsEpochMillis;
+        World.SyncResult pveMarch = world.applyUpdate("first-player", new Messages.ClientUpdate(1, 0, 0, 0, 0,
+                List.of(new Messages.Command("neutral-army-01", "SEND_ARMY", neutral.playerId(), "", 50, 0, ""))));
+        check(pveMarch.commandResults().getFirst().accepted()
+                        && "NPC_ARMY_SENT".equals(pveMarch.commandResults().getFirst().code()),
+                "neutral NPC city can be attacked without a House war");
+        check(first.player().protectionEndsEpochMillis == protectionBeforePve,
+                "PvE attacks do not end beginner protection");
+        long pveArrival = pveMarch.armies().stream().filter(army -> "NPC_ATTACK".equals(army.mission()))
+                .findFirst().orElseThrow().arrivesEpochMillis();
+        world.resolveArmies(pveArrival + 1);
+        check(world.initialSync("first-player", 0).battleReports().stream()
+                        .anyMatch(report -> neutral.playerId().equals(report.defenderPlayerId())
+                                && report.outcome().startsWith("NPC_")),
+                "neutral battle resolves into a persistent PvE report");
         world.applyUpdate("first-player", new Messages.ClientUpdate(1, 0, 0, 0, 0, List.of(
                 new Messages.Command("first-house-001", "CREATE_HOUSE", "", "FIR", 0, 0, "First House"))));
         world.applyUpdate("second-player", new Messages.ClientUpdate(1, 0, 0, 0, 0, List.of(
@@ -431,6 +468,45 @@ public final class WorldPersistenceTest {
                 "launching an army ends attacker protection");
         check(launched.events().stream().anyMatch(event -> "PROTECTION_ENDED".equals(event.type())),
                 "protection-ending event is public");
+    }
+
+    private static void verifyRequestedFoundingReload(Path worldFile) throws Exception {
+        ServerConfig config = config(worldFile);
+        SharedWorldTerrain terrain = new SharedWorldTerrain(config.worldSeed());
+        World world = new World(config);
+        String playerId = "requested-location-player";
+        String token = "12121212121212121212121212121212";
+        World.JoinResult founded = null;
+        for (int y = 0; y < config.worldHeight() && founded == null; y++) {
+            for (int x = 0; x < config.worldWidth() && founded == null; x++) {
+                if ((x % config.citySpacing() == 0 && y % config.citySpacing() == 0)
+                        || !terrain.canFoundCity(x, y)) {
+                    continue;
+                }
+                Messages.Hello requested = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                        "Syx Kingdoms Online@0.14.0", 0, 0, SharedWorld.WORLD_ID, playerId, token,
+                        "Requested Ruler", "Requested Realm", "Requested Capital", x + "," + y);
+                try {
+                    founded = world.join(requested);
+                } catch (ProtocolException expectedWhenClusterIsBlocked) {
+                    check(expectedWhenClusterIsBlocked.code().startsWith("FOUNDING_"),
+                            "requested founding candidate failure has a founding error code");
+                }
+            }
+        }
+        check(founded != null, "a non-grid native capital coordinate can be founded");
+        check(founded.player().x % config.citySpacing() != 0 || founded.player().y % config.citySpacing() != 0,
+                "requested capital is not restricted to the automatic-allocation grid");
+        int foundedX = founded.player().x;
+        int foundedY = founded.player().y;
+        world.leave(playerId);
+        world.save();
+
+        World reloaded = new World(config);
+        World.JoinResult joinedAgain = reloaded.join(hello(playerId, token,
+                "Ignored Reconnect Ruler", "Ignored Reconnect Capital"));
+        check(joinedAgain.player().x == foundedX && joinedAgain.player().y == foundedY,
+                "requested non-grid capital coordinate survives server restart");
     }
 
     private static void verifyLegacyFoundingMigration(Path worldFile) throws Exception {
@@ -455,8 +531,8 @@ public final class WorldPersistenceTest {
         }
 
         World migrated = new World(config(worldFile));
-        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, "legacy-player", token,
+        Messages.Hello blank = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0", 0, 0, SharedWorld.WORLD_ID, "legacy-player", token,
                 "", "", "", "");
         try {
             migrated.join(blank);
@@ -472,6 +548,50 @@ public final class WorldPersistenceTest {
         check(completed.player().foundingComplete(), "legacy profile is upgraded to complete founding state");
     }
 
+    private static void verify2560GeometryMigration(Path worldFile) throws Exception {
+        String playerId = "geometry-player";
+        String token = "44444444444444444444444444444444";
+        ServerConfig config = config(worldFile);
+        World original = new World(config);
+        original.join(hello(playerId, token, "Geometry Ruler", "Geometry Capital"));
+        original.leave(playerId);
+        original.save();
+
+        Properties legacy = new Properties();
+        try (var reader = Files.newBufferedReader(worldFile)) {
+            legacy.load(reader);
+        }
+        legacy.setProperty("world.width", "2560");
+        legacy.setProperty("world.height", "2560");
+        legacy.setProperty("world.terrainFingerprint", "legacy-2560-fingerprint");
+        legacy.setProperty("player.0.x", "1014");
+        legacy.setProperty("player.0.y", "862");
+        try (var writer = Files.newBufferedWriter(worldFile)) {
+            legacy.store(writer, "simulated 2560-square persistent world");
+        }
+
+        World migrated = new World(config);
+        World.JoinResult joined = migrated.join(hello(
+                playerId, token, "Ignored Ruler", "Ignored Capital"));
+        check(Math.abs(joined.player().x - 396) <= 32 && Math.abs(joined.player().y - 337) <= 32,
+                "2560 player coordinate migrates proportionally onto nearby buildable 1000 terrain");
+        check(migrated.snapshot().cities().size() == 4,
+                "geometry migration recreates the player's three deterministic NPC cities");
+        migrated.leave(playerId);
+        migrated.save();
+
+        Properties canonical = new Properties();
+        try (var reader = Files.newBufferedReader(worldFile)) {
+            canonical.load(reader);
+        }
+        check("1000".equals(canonical.getProperty("world.width"))
+                        && "1000".equals(canonical.getProperty("world.height")),
+                "migrated world is persisted with canonical geometry");
+        check(new SharedWorldTerrain(config.worldSeed()).fingerprint()
+                        .equals(canonical.getProperty("world.terrainFingerprint")),
+                "migrated world receives the canonical 1000 terrain fingerprint");
+    }
+
     static ServerConfig config(Path worldFile) {
         return config(worldFile, 0);
     }
@@ -479,14 +599,14 @@ public final class WorldPersistenceTest {
     static ServerConfig config(Path worldFile, long beginnerProtectionMillis) {
         return ServerConfig.validate(new ServerConfig("127.0.0.1", 0, SharedWorld.WORLD_ID, SharedWorld.WORLD_NAME,
                 worldFile, SharedWorld.WIDTH, SharedWorld.HEIGHT, 8, SharedWorld.WORLD_SEED,
-                "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0",
-                1000, 1.0, 2048, beginnerProtectionMillis, 5000, 1000));
+                "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0",
+                1000, 1.0, SharedWorld.MAX_PLAYER_CITIES, beginnerProtectionMillis, 5000, 1000));
     }
 
     static Messages.Hello hello(String id, String token, String name, String city) {
-        return new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0", 0, 0, SharedWorld.WORLD_ID, id, token,
+        return new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0", 0, 0, SharedWorld.WORLD_ID, id, token,
                 name, "Realm " + id, city, "");
     }
 
@@ -494,5 +614,55 @@ public final class WorldPersistenceTest {
         if (!condition) {
             throw new AssertionError(label);
         }
+    }
+
+    private static long drainEventCursor(World world, String playerId) throws Exception {
+        long cursor = 0;
+        for (int page = 0; page < 100; page++) {
+            World.SyncResult sync = world.initialSync(playerId, cursor);
+            if (sync.eventCursor() == cursor) {
+                return cursor;
+            }
+            cursor = sync.eventCursor();
+            if (sync.events().size() < Protocol.MAX_EVENTS_PER_SYNC) {
+                return cursor;
+            }
+        }
+        throw new AssertionError("event cursor did not drain");
+    }
+
+    private static boolean hasVisibleEvent(World world, String playerId,
+            java.util.function.Predicate<Messages.WorldEvent> predicate) throws Exception {
+        long cursor = 0;
+        for (int page = 0; page < 100; page++) {
+            World.SyncResult sync = world.initialSync(playerId, cursor);
+            if (sync.events().stream().anyMatch(predicate)) {
+                return true;
+            }
+            if (sync.eventCursor() == cursor || sync.events().size() < Protocol.MAX_EVENTS_PER_SYNC) {
+                return false;
+            }
+            cursor = sync.eventCursor();
+        }
+        throw new AssertionError("event visibility scan did not drain");
+    }
+
+    private static boolean isNpc(Messages.City city) {
+        return city.playerId().startsWith("npc-");
+    }
+
+    private static boolean withinLocalChat(PlayerRecord first, PlayerRecord second) {
+        long radius = SharedWorld.LOCAL_CHAT_RADIUS;
+        return distanceSquared(first, second) <= radius * radius;
+    }
+
+    private static long distanceSquared(PlayerRecord first, PlayerRecord second) {
+        return distanceSquared(first.x, first.y, second.x, second.y);
+    }
+
+    private static long distanceSquared(int x1, int y1, int x2, int y2) {
+        long dx = (long) x1 - x2;
+        long dy = (long) y1 - y2;
+        return dx * dx + dy * dy;
     }
 }

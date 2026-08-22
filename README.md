@@ -7,26 +7,31 @@ player identity, settlement roster, trade, diplomacy, and armies.
 There is one canonical persistent world: its ID, dimensions, geography seed, and
 terrain-generation version are fixed rather than chosen by individual players.
 
-This repository currently contains the V0.13 playable shared-world vertical slice:
+This repository currently contains the V0.14 playable shared-world vertical slice:
 
 - a dedicated Java server with an atomically persisted world;
 - authenticated, reconnectable player identities;
 - an in-game first-join flow for a permanent, uniquely named ruler, kingdom, and
-  capital, with optional placement near an existing kingdom;
-- one server-side city slot per player, claimed atomically only after founding
-  validation succeeds;
-- a persistent `2560 × 2560` server world—ten times the base game's `256 × 256`
-  width and height—with collision-free city coordinates distributed across it;
+  capital, followed by server-assigned isolated placement;
+- one server-owned four-city cluster per player: the player capital and exactly
+  three nearby persistent neutral PvE settlements;
+- a 64-tile minimum distance between player capitals, no player-selected nearby
+  placement, and verified capacity for 90 player clusters / 360 city nodes;
+- one pre-generated native `1000 × 1000` Songs of Syx world, built from the
+  canonical grayscale heightmap and bundled as an immutable launcher template;
 - live population and treasury summaries for every connected city;
 - a fixed 1x online game speed (pause and speed changes are immediately undone);
 - a connection gate that freezes the city while joining, disconnected, or behind
   on authoritative server heartbeats;
+- a dedicated exact-V71 launcher patch that expands native world allocation,
+  generation pathing, heightmap sampling, and world-map zoom only in online mode;
 - a V71 Songs of Syx script mod with automatic reconnect and an in-game shared
-  city map;
+  city roster over the native world map;
 - an exclusive-mod handshake: online mode refuses to run alongside any other mod;
 - an online ruleset that blocks development/debug mode, quickload, the vanilla
   strategic world screen, and vanilla AI imports/exports, and binds saves to the
   player's persistent identity;
+- disabled vanilla title selection and title-derived kingdom bonuses;
 - persistent province-local and world-wide chat, private mail, diplomacy,
   server crowns/levies, crown transfers,
   physical-resource shipments, public market offers, traveling armies, and raid
@@ -43,7 +48,9 @@ This repository currently contains the V0.13 playable shared-world vertical slic
   claims, occupation influence, annexation, blockades, daily tribute, map colors, 30-day
   seasons, war score, and domination/high-score victory conditions;
 - five real days of beginner protection; protected kingdoms cannot be attacked,
-  and launching an army ends the attacker's remaining protection;
+  and launching an army against a player ends the attacker's remaining protection;
+- neutral cities with three difficulty levels, persistent garrisons and treasuries,
+  real travel, regeneration, crown loot, and server-owned PvE battle reports;
 - clickable shared-map controls with live, non-modal overlay text entry that does
   not pause the local city while naming, chatting, trading, or issuing orders;
 - replay-safe commands that are durably saved before acknowledgment;
@@ -73,6 +80,7 @@ The build runs all tests and creates:
 ```text
 build/dist/Syx Kingdoms Online/       installable game mod
 build/dist/server/                    dedicated server
+build/dist/launcher/                  dedicated online launcher and fixed world
 ```
 
 ## Local two-player test
@@ -93,22 +101,40 @@ build/dist/server/                    dedicated server
 
    Then enable it in the launcher and disable every other mod. The client checks
    Songs of Syx's active-mod list before connecting, and the server also requires
-   the exact `Syx Kingdoms Online@0.13.0` manifest. The installer preserves an
+   the exact `Syx Kingdoms Online@0.14.0` manifest. The installer preserves an
    existing client `config.txt`; pass `-ResetConfig` only when you intentionally
    want the defaults.
-4. Start or load a city. On the first connection, live multiplayer-overlay prompts
-   ask for a ruler name, unique kingdom name, capital name, and an optional existing
-   kingdom to settle near. Leave the last prompt blank for balanced deterministic
-   placement. The server reserves all names and the city location together, so a
+4. Start the dedicated online entry point:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\tools\run-online.ps1
+   ```
+
+   This opt-in launcher leaves the original game JAR untouched, changes the root
+   **Play** entry to **Multiplayer**, and bypasses Random Game and its single-player
+   tweak presets. Click **Multiplayer**. It loads the bundled persistent
+   `1000 × 1000` native world directly; it never asks the player for a seed, map
+   type, bonuses, or a newly generated world. On the first connection, live multiplayer prompts
+   ask for a ruler name, unique kingdom name, and capital name. Click a plains or
+   forest location on the shared map and confirm it. The server verifies that it
+   is buildable, unoccupied, at least 64 shared tiles from every other player, and
+   has space for three nearby neutral settlements. The server reserves all
+   names and the four-city cluster together, so a
    rejected name never consumes a slot. Identity and a strong authentication
    token are generated automatically under the player's Songs of Syx
    application-data directory. The city remains at the canonical 1x speed while
-   the player types.
+   the player types. After server acceptance, choose the species that will inhabit the
+   city. The mod skips native faction customization, titles, random map selection,
+   capital placement, and world inspection. The player's settlement opens from
+   the fixed world template; do not choose or generate a vanilla map manually.
 5. The client log reports the server connection and the
    number of visible online cities. The overlay shows every claimed city on the
    server-defined shared map; your city is orange, online rivals are green, and
-   offline cities are gray. Grid lines divide the online world into 100 sectors;
-   every sector is the same `256 × 256` size as a normal base-game world map.
+   offline cities are gray, and neutral PvE cities are brighter gray. Grid lines
+   divide the online world into 100 persistent `100 × 100` provinces.
+   On the native world screen, mouse-wheel zoom now reaches level 4 in online
+   mode—two steps farther out than the stock world camera. Settlement and battle
+   zoom limits remain unchanged.
    Click another city to select it, then use the six tabs: **World Map**,
    **Chat/Mail**, **House**, **Armies/Reports**, **Market**, and
    **Profile/Crest**. Local chat reaches rulers inside your current `256 × 256`
@@ -128,9 +154,16 @@ build/dist/server/                    dedicated server
    and a 128-pixel preview. Saving sends the design to the authoritative server;
    other players receive and cache the validated revision automatically.
 
-   A newly founded kingdom is protected from incoming armies for five real days.
-   The overlay shows the remaining protection. Sending an army while protected
-   displays a warning and permanently ends the sender's remaining protection.
+   A newly founded kingdom is protected from incoming player armies for five real
+   days. The overlay shows the remaining protection. Sending an army against a
+   player while protected displays a warning and permanently ends the sender's
+   remaining protection. Attacking a neutral PvE city does not cancel protection.
+
+   Every player capital has three selectable neutral cities nearby. They are level
+   1-3 PvE targets with persistent garrisons and treasuries. Select one and use
+   **Attack NPC** or the Armies tab; no House war is required. Travel and battle
+   resolve on the server, surviving levies return, and the neutral city gradually
+   rebuilds its garrison and crowns.
 
    PvP requires both kingdoms to belong to different Houses. A Sovereign or
    Marshal declares war from **Armies/Reports**. The server announces the war,
@@ -141,11 +174,17 @@ build/dist/server/                    dedicated server
    truce. A season lasts 30 days; owning 30 provinces wins immediately, otherwise
    the highest combined province/war score wins at the deadline.
 
-The 10× measurement is linear: the online grid is ten base maps wide and ten
-base maps tall. Its total coordinate area is therefore 100 times the base map.
-The dedicated server stores city claims and a fingerprint of the canonical
-terrain in `server-data/syx-kingdoms-world-v1.properties`; it verifies the map on
-every restart rather than generating a new world.
+The authoritative online world is 1000 tiles wide and 1000 tiles tall. Exact V71
+normally rejects native worlds above 512×512. The dedicated online launcher
+patches that allocation check, the global world-generation flooder, heightmap
+normalization, and the world camera in memory; it does not edit `SongsOfSyx.jar`
+and does not affect normal single-player launches. The resulting native world is
+generated once, stored at
+`world/syx-kingdoms-native-world-1000-v1.save`, and copied into every launcher
+build. The server stores city claims and the corresponding terrain fingerprint in
+`server-data/syx-kingdoms-1000-world-v1.properties` and verifies it on restart.
+The canonical 1024×1024 heightmap includes a four-percent ocean safety border so
+outer islands and coastlines are not clipped by native generation.
 
 The default server listens on raw TCP port `49720` for local development. Never
 forward that port to the public internet. The client supports TLS with normal

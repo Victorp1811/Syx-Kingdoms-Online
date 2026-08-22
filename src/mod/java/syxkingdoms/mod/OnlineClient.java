@@ -36,14 +36,17 @@ final class OnlineClient implements AutoCloseable {
         void log(String message, Throwable error);
     }
 
-    record FoundingProfile(String rulerName, String kingdomName, String capitalName, String placementReference) {
+    record FoundingProfile(String rulerName, String kingdomName, String capitalName,
+            int worldX, int worldY) {
     }
 
-    private static final String MOD_VERSION = "0.13.0";
+    private static final String MOD_VERSION = "0.14.0";
     private static final Set<String> FOUNDING_ERROR_CODES = Set.of(
             "FOUNDING_REQUIRED", "BAD_FOUNDING_NAME", "RESERVED_NAME",
             "RULER_NAME_TAKEN", "KINGDOM_NAME_TAKEN", "CAPITAL_NAME_TAKEN",
-            "PLACEMENT_REFERENCE_NOT_FOUND");
+            "FOUNDING_LOCATION_REQUIRED", "FOUNDING_LOCATION_INVALID",
+            "FOUNDING_LOCATION_TAKEN", "FOUNDING_LOCATION_TOO_CLOSE",
+            "FOUNDING_CLUSTER_BLOCKED");
     private final ClientConfig config;
     private final Identity identity;
     private final String gameVersion;
@@ -144,9 +147,8 @@ final class OnlineClient implements AutoCloseable {
         return foundingMessage;
     }
 
-    void submitFounding(String rulerName, String kingdomName, String capitalName, String placementReference) {
-        foundingProfile = new FoundingProfile(rulerName, kingdomName, capitalName,
-                placementReference == null ? "" : placementReference);
+    void submitFounding(String rulerName, String kingdomName, String capitalName, int worldX, int worldY) {
+        foundingProfile = new FoundingProfile(rulerName, kingdomName, capitalName, worldX, worldY);
         status = "submitting kingdom founding claim";
     }
 
@@ -342,7 +344,7 @@ final class OnlineClient implements AutoCloseable {
                     profile == null ? "" : profile.rulerName(),
                     profile == null ? "" : profile.kingdomName(),
                     profile == null ? "" : profile.capitalName(),
-                    profile == null ? "" : profile.placementReference());
+                    profile == null ? "" : profile.worldX() + "," + profile.worldY());
             LineIO.writeLine(socket.getOutputStream(), hello.encode());
             String first = LineIO.readLine(socket.getInputStream());
             if (first.startsWith("ERROR\t")) {
@@ -352,6 +354,11 @@ final class OnlineClient implements AutoCloseable {
                     foundingProfile = null;
                     foundingMessage = error.message();
                     status = error.code() + ": " + error.message();
+                    try {
+                        worldState = readState(socket);
+                    } catch (IOException | RuntimeException previewError) {
+                        logger.log("Founding map preview was unavailable", config.debug() ? previewError : null);
+                    }
                     return;
                 }
                 throw new ProtocolException(error.code(), error.message());

@@ -2,6 +2,7 @@ package syxkingdoms.server;
 
 import syxkingdoms.protocol.CrestDesign;
 import syxkingdoms.protocol.Messages;
+import syxkingdoms.protocol.SharedWorld;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,7 +77,7 @@ public final class WorldSoakTest {
             }
 
             World.SyncResult full = world.initialSync(identities.getFirst().playerId(), 0);
-            check(full.worldState().cities().size() == PLAYER_COUNT
+            check(full.worldState().cities().size() == PLAYER_COUNT * (SharedWorld.NPC_CITIES_PER_PLAYER + 1)
                             && full.houses().size() == HOUSE_COUNT
                             && full.wars().size() == HOUSE_COUNT / 2
                             && full.battleReports().size() == expectedReports,
@@ -93,7 +94,7 @@ public final class WorldSoakTest {
                             eventCursor,
                             0,
                             List.of()));
-                    check(sync.worldState().cities().size() == PLAYER_COUNT,
+                    check(sync.worldState().cities().size() == PLAYER_COUNT * (SharedWorld.NPC_CITIES_PER_PLAYER + 1),
                             "sync roster remains complete in cycle " + cycle);
                     eventCursors.put(identity.playerId(), Math.max(eventCursor, sync.eventCursor()));
                 }
@@ -130,7 +131,9 @@ public final class WorldSoakTest {
                 "final persisted world has no lost or phantom strategic state");
         Set<String> finalCoordinates = new HashSet<>();
         for (Messages.City city : finalWorld.snapshot().cities()) {
-            finalCoordinates.add(city.x() + "," + city.y());
+            if (!city.playerId().startsWith("npc-")) {
+                finalCoordinates.add(city.x() + "," + city.y());
+            }
         }
         check(finalCoordinates.equals(new HashSet<>(coordinates.values())),
                 "all coordinates remain stable after the full soak");

@@ -9,18 +9,39 @@ each player's normal Songs of Syx process as a city shard and gives the dedicate
 server authority over state that crosses city boundaries.
 
 Songs of Syx 0.71.44 defines its base world with a tile dimension of 256. The
-online coordinate plane is exactly `2560 × 2560`: ten base maps along each axis,
-or 100 base-map-sized provinces. City coordinates, travel routes, House capitals,
+online coordinate plane is exactly `1000 × 1000`, divided into 100 persistent
+`100 × 100` strategic provinces. City coordinates, travel routes, House capitals,
 and territorial ownership all use this persistent server coordinate system.
-The server seed deterministically produces coarse water, plains, forest, and
-mountain terrain. Only plains and forest accept city slots. Because generation is
-shared protocol code, clients reconstruct identical geography without downloading
-a multi-million-tile map on every connection.
+The bundled grayscale heightmap deterministically produces the native water,
+plains, forest, and mountain terrain. The server samples that same image into its
+strategic placement grid, and only plains and forest accept city slots.
 The map ID and seed are compile-time canonical values. Persistence stores the
 terrain-generation number and a deterministic terrain fingerprint, and startup
 fails if either differs. Running the authoritative service as a single public
 deployment is the remaining operational step that makes this one logical world
 globally, rather than merely one verified world file per server installation.
+Exact V71 normally validates world configuration at no more than 512×512 and its
+global generation flooder is sized to the 768-tile settlement. The dedicated
+online Java agent raises both limits to 1000, normalizes heightmap sampling against
+the image's 0–255 range, and raises the native world camera cap from zoom 2 to zoom
+4. The source is inset behind a four-percent ocean safety border before generation.
+A generated native world is saved once and distributed as an immutable launcher
+template. Normal joins load that exact save; they never invoke random generation.
+The server remains authoritative for shared identities, city claims, diplomacy,
+trade, armies, Houses, wars, and persistence, while each client simulates only its
+own settlement.
+The selected shared coordinate is a requested capital anchor, not an unchecked
+client write. The server verifies buildable terrain, exact occupancy, the 64-tile
+player exclusion radius, and the availability of three separated nearby NPC sites
+in one synchronized founding transaction.
+
+The ordinary V71 menu exists before gameplay scripts are instantiated. A small
+opt-in Java instrumentation agent therefore owns the dedicated online entry path:
+it changes the root Play label/action to Multiplayer and loads the fixed online
+world with neutral bonuses and forced scripts. Six verified V71 classes are
+transformed in memory for the menu, native size check, generator pathing,
+heightmap scale, and world-camera cap. The original game JAR and normal
+single-player launch are not modified.
 
 | Owner | State |
 | --- | --- |
@@ -63,7 +84,9 @@ clients cache designs without including every crest in every heartbeat. New king
 configurable five-day default protection window. Incoming armies are rejected
 until it expires; the first accepted outgoing army clears the attacker's window.
 
-The client script runs on the game's normal update hook. A fresh server heartbeat
+The client script normally runs on the game's update hook and uses its render/frame
+hook as the V71 generator-safe bootstrap path, because native modal world stages do
+not call `SCRIPT.update()`. A fresh server heartbeat
 unlocks exactly 1x simulation; joining, disconnection, or a stale session locks it
 to 0x. An input filter consumes pause, speed, quickload, debugger, and vanilla
 world-switch hotkeys before the normal game handler sees them, while update and
@@ -80,12 +103,13 @@ continues at 1x while the player types.
 
 1. **Foundation (implemented):** server, identity, persistent city allocation,
    roster, city summaries, fixed time speed, reconnect, integration tests.
-2. **10× shared-world contract and panel (implemented):** a persistent 2560-square
-   coordinate plane, 100 visible base-map sectors, deterministic city coordinates,
+2. **Shared-world contract and panel (implemented):** a persistent 1000-square
+   coordinate plane, 100 visible strategic provinces, deterministic city coordinates,
    exact version/mod-set checks, and an in-game remote-city map.
-3. **Kingdom founding (implemented MVP):** permanent ruler/kingdom/capital names,
-   optional social placement, atomic claims, legacy-profile migration, and
-   beginner protection.
+3. **Kingdom founding (implemented):** permanent ruler/kingdom/capital names,
+   isolated server placement with a 64-tile player exclusion radius, three nearby
+   persistent neutral PvE cities, atomic claims, legacy migration, and beginner
+   protection. Social/near-friend placement is deliberately disabled.
 4. **Vanilla world-map projection:** materialize remote cities as player-owned
    regions and make shared locations interactive in the normal game UI.
 5. **Strategic economy (implemented MVP):** server crowns/levies, transfers,
@@ -129,6 +153,10 @@ continues at 1x while the player types.
     prompts with hotkey capture, plus release-gating coverage for 48 clients,
     eight Houses, four wars, six restarts, reconnect storms, command replay, and
     thousands of synchronization updates.
+15. **Player clusters and neutral PvE (implemented):** verified 512-player
+    allocation, exactly three levelled neutral cities per player, persistent NPC
+    economy/garrisons, PvE marches, loot, reports, regeneration, and protocol/world
+    migrations.
 
 ## Non-goals
 

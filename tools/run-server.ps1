@@ -1,10 +1,15 @@
 [CmdletBinding()]
 param(
-    [string]$Config = (Join-Path $PSScriptRoot '..\server\server.properties')
+    [string]$Config
 )
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$Config = if ([string]::IsNullOrWhiteSpace($Config)) {
+    Join-Path $root 'server\server.properties'
+} else {
+    $Config
+}
 $serverJar = Join-Path $root 'build\dist\server\syx-kingdoms-server.jar'
 
 if (-not (Test-Path -LiteralPath $serverJar -PathType Leaf)) {

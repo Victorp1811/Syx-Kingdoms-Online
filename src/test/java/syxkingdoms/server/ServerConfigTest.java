@@ -16,7 +16,7 @@ public final class ServerConfigTest {
         check(SharedWorld.WORLD_SEED.equals(config.worldSeed()), "canonical world seed");
         check(config.worldWidth() == SharedWorld.WIDTH && config.worldHeight() == SharedWorld.HEIGHT,
                 "canonical world dimensions");
-        check(config.maxPlayers() == 2048, "canonical player capacity");
+        check(config.maxPlayers() == SharedWorld.MAX_PLAYER_CITIES, "canonical player capacity");
         check(config.beginnerProtectionMillis() == 432_000_000L, "canonical five-day beginner protection");
         check(Double.compare(config.fixedGameSpeed(), SharedWorld.FIXED_GAME_SPEED) == 0,
                 "canonical fixed 1x simulation speed");

@@ -43,7 +43,7 @@ must be updated deliberately whenever the certificate changes.
 
 ## Persistence and backups
 
-The authoritative file is `server-data/syx-kingdoms-world-v1.properties`. It
+The authoritative file is `server-data/syx-kingdoms-1000-world-v1.properties`. It
 contains player authentication hashes, city ownership, event history, diplomacy,
 server crowns/levies, founding profiles, real-time protection deadlines, traveling
 armies, shipments, and pending deliveries. The server also stores the public
@@ -69,7 +69,7 @@ join logs before reopening traffic.
 ## Operational minimums
 
 - Run exactly one writable authoritative instance.
-- Keep `FIXED_GAME_SPEED=1.0`; V0.13 rejects every other value on server startup
+- Keep `FIXED_GAME_SPEED=1.0`; V0.14 rejects every other value on server startup
   and every non-1x welcome on the client.
 - Keep `BEGINNER_PROTECTION_MILLIS=432000000` for the canonical five-day ruleset;
   changing it affects only kingdoms founded afterward.

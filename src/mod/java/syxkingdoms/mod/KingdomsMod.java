@@ -3,6 +3,7 @@ package syxkingdoms.mod;
 import game.GAME;
 import game.VERSION;
 import game.faction.FACTIONS;
+import init.constant.C;
 import init.sprite.BitmapSprite;
 import script.SCRIPT;
 import settlement.stats.POP;
@@ -24,6 +25,11 @@ import java.io.IOException;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.UUID;
+import view.main.VIEW;
+import view.subview.GameWindow;
+import view.world.WorldView;
+import view.world.generator.WorldViewGenerator;
+import world.WORLD;
 
 public final class KingdomsMod implements SCRIPT {
     private static RuntimeInstance active;
@@ -59,7 +65,13 @@ public final class KingdomsMod implements SCRIPT {
 
     private static final class RuntimeInstance implements SCRIPT_INSTANCE, AutoCloseable {
         private enum OnlineTab { WORLD, CHAT, HOUSE, ARMIES, MARKET, PROFILE }
+        private enum ChatChannel { LOCAL, GLOBAL, HOUSE, MAIL }
         private record UiAction(int x1, int x2, int y1, int y2, String id, boolean enabled) { }
+        private record MapViewport(int minX, int minY, int spanX, int spanY) {
+            private boolean contains(int x, int y) {
+                return x >= minX && x < minX + spanX && y >= minY && y < minY + spanY;
+            }
+        }
         private static final int CREST_PANEL_X1 = 10;
         private static final int CREST_PANEL_Y1 = 86;
         private static final int CREST_PANEL_X2 = 630;
@@ -81,11 +93,16 @@ public final class KingdomsMod implements SCRIPT {
         private static final int INPUT_CANCEL_X2 = 658;
         private static final int INPUT_BUTTON_Y1 = 274;
         private static final int INPUT_BUTTON_Y2 = 300;
+        private static final COLOR MAP_WATER = new ColorImp(25, 54, 86);
+        private static final COLOR MAP_PLAINS = new ColorImp(116, 105, 65);
+        private static final COLOR MAP_FOREST = new ColorImp(38, 91, 47);
+        private static final COLOR MAP_MOUNTAIN = new ColorImp(126, 123, 116);
         private final OnlineClient client;
         private final String startupError;
         private final TradeLedger tradeLedger;
         private final OverlayTextInput textInput = new OverlayTextInput();
         private final OnlineRules onlineRules = new OnlineRules(textInput);
+        private final MultiplayerBootstrap bootstrap = new MultiplayerBootstrap();
         private volatile String fatalOnlineError;
         private long loadedLedgerRevision;
         private boolean rollbackReconciliationPending;
@@ -140,13 +157,50 @@ public final class KingdomsMod implements SCRIPT {
         private boolean crestEditorOpen;
         private CrestEditorModel crestEditor;
         private boolean crestEditorForHouse;
+        private boolean crestEditorForFounding;
+        private CrestDesign pendingFoundingCrest;
         private OnlineTab activeTab = OnlineTab.WORLD;
+        private ChatChannel activeChatChannel = ChatChannel.GLOBAL;
         private List<UiAction> tabActions = List.of();
         private int selectedHouseIndex;
         private int selectedHouseRequestIndex;
         private int selectedWarIndex;
         private boolean foundingPromptActive;
         private long nextFoundingPromptAt;
+        private boolean foundingPlacementActive;
+        private String foundingRuler = "";
+        private String foundingKingdom = "";
+        private String foundingCapital = "";
+        private int foundingWorldX = -1;
+        private int foundingWorldY = -1;
+        private String foundingPlacementStatus = "Click a plains or forest location for your capital.";
+        private int foundingMapX1 = -1;
+        private int foundingMapY1 = -1;
+        private int foundingMapX2 = -1;
+        private int foundingMapY2 = -1;
+        private int foundingConfirmX1 = -1;
+        private int foundingConfirmX2 = -1;
+        private int foundingConfirmY1 = -1;
+        private int foundingConfirmY2 = -1;
+        private int foundingMapZoom = 1;
+        private int foundingMapCenterX = SharedWorld.WIDTH / 2;
+        private int foundingMapCenterY = SharedWorld.HEIGHT / 2;
+        private int foundingZoomOutX1 = -1;
+        private int foundingZoomOutX2 = -1;
+        private int foundingZoomInX1 = -1;
+        private int foundingZoomInX2 = -1;
+        private int foundingPanLeftX1 = -1;
+        private int foundingPanLeftX2 = -1;
+        private int foundingPanRightX1 = -1;
+        private int foundingPanRightX2 = -1;
+        private int foundingPanUpX1 = -1;
+        private int foundingPanUpX2 = -1;
+        private int foundingPanDownX1 = -1;
+        private int foundingPanDownX2 = -1;
+        private int foundingFullMapX1 = -1;
+        private int foundingFullMapX2 = -1;
+        private int foundingMapControlY1 = -1;
+        private int foundingMapControlY2 = -1;
 
         private RuntimeInstance(OnlineClient client, String startupError, TradeLedger tradeLedger) {
             this.client = client;
@@ -208,9 +262,7 @@ public final class KingdomsMod implements SCRIPT {
                 return;
             }
             long now = System.currentTimeMillis();
-            if (client.foundingRequired() && !foundingPromptActive && now >= nextFoundingPromptAt) {
-                beginFoundingPrompts();
-            }
+            maybeBeginFoundingPrompts(now);
             if (now >= nextStatsAt) {
                 nextStatsAt = now + 1_000;
                 try {
@@ -324,6 +376,16 @@ public final class KingdomsMod implements SCRIPT {
         public void render(Renderer renderer, float ds) {
             boolean simulationReady = client != null && fatalOnlineError == null && client.simulationReady();
             onlineRules.enforceFrame(simulationReady);
+            if (client != null) {
+                // SCRIPT.update() is not called by V71 while the new-world modal stages are active.
+                client.touchGameUpdate();
+                maybeBeginFoundingPrompts(System.currentTimeMillis());
+                maybeSubmitFoundingCrest();
+                bootstrap.advance(client);
+                if (!bootstrap.failure().isBlank()) {
+                    setFatalOnlineError("MULTIPLAYER_BOOTSTRAP_FAILED: " + bootstrap.failure());
+                }
+            }
             String activeError = fatalOnlineError == null ? startupError : fatalOnlineError;
             if (activeError != null) {
                 renderStartupError(renderer, activeError);
@@ -337,13 +399,17 @@ public final class KingdomsMod implements SCRIPT {
                 renderTextPrompt(renderer);
                 return;
             }
+            if (renderGeneratorBootstrap(renderer)) {
+                return;
+            }
+            Messages.WorldState state = client.worldState();
+            renderNativeWorldMarkers(renderer, state);
             renderTabBar(renderer);
             if (activeTab != OnlineTab.WORLD) {
                 renderActiveTab(renderer);
                 renderTextPrompt(renderer);
                 return;
             }
-            Messages.WorldState state = client.worldState();
             int maxCities = client.config().overlayMaxCities();
             int shown = 0;
             int onlineCount = 0;
@@ -358,14 +424,10 @@ public final class KingdomsMod implements SCRIPT {
             int rows = 1 + shown;
             int x1 = 10;
             int y1 = 86;
-            int width = client.config().showWorldMap()
-                    ? Math.max(430, client.config().worldMapWidth() + 12)
-                    : 430;
+            int width = 500;
             int rowHeight = Math.max(14, UI.FONT().S.height() + 2);
             int rosterHeight = 8 + rows * rowHeight;
-            int mapBlockHeight = client.config().showWorldMap()
-                    ? rowHeight + client.config().worldMapHeight() + 10
-                    : 0;
+            int mapBlockHeight = 0;
             int socialRows = Math.min(4, client.recentEvents().size());
             int socialHeight = (socialRows + 6) * rowHeight + 22;
             int panelY2 = y1 + rosterHeight + mapBlockHeight + socialHeight;
@@ -394,13 +456,110 @@ public final class KingdomsMod implements SCRIPT {
             }
             COLOR.unbind();
 
-            if (client.config().showWorldMap()) {
-                renderSharedWorld(renderer, state, x1 + 6, y1 + rosterHeight,
-                        client.config().worldMapWidth(), client.config().worldMapHeight(), rowHeight);
-            }
             renderSocial(renderer, state, x1 + 6, y1 + rosterHeight + mapBlockHeight,
                     width - 12, rowHeight, socialRows);
             renderTextPrompt(renderer);
+        }
+
+        private void maybeBeginFoundingPrompts(long now) {
+            // The native species stage must remain visible and finish before our
+            // name/location form takes keyboard focus. The fixed terrain is then
+            // prepared (and, in developer mode, exported) before capital choice.
+            if (bootstrap.generatorActive()
+                    && (bootstrap.waitingForSpecies() || !bootstrap.nativeWorldPrepared())) {
+                return;
+            }
+            if (client != null && client.foundingRequired() && !foundingPromptActive
+                    && !textInput.active() && now >= nextFoundingPromptAt) {
+                beginFoundingPrompts();
+            }
+        }
+
+        private void maybeSubmitFoundingCrest() {
+            if (pendingFoundingCrest == null || client == null || !client.simulationReady()) {
+                return;
+            }
+            String commandId = client.setCrest(pendingFoundingCrest);
+            if (!commandId.isBlank()) {
+                pendingFoundingCrest = null;
+                GAME.Notify("Your 32x32 founding crest was queued for server validation");
+            }
+        }
+
+        private boolean renderGeneratorBootstrap(Renderer renderer) {
+            if (!(VIEW.current() instanceof WorldViewGenerator)) {
+                return false;
+            }
+            int rowHeight = Math.max(14, UI.FONT().S.height() + 2);
+            if (bootstrap.waitingForSpecies()) {
+                COLOR.BLACK.render(renderer, 10, Math.min(C.WIDTH() - 10, 760), 10, 52);
+                COLOR.ORANGE100.bind();
+                UI.FONT().S.render(renderer, "Syx Kingdoms Online - choose your city species", 20, 17);
+                COLOR.WHITE100.bind();
+                UI.FONT().S.render(renderer,
+                        "Choose once. The launcher then loads the fixed persistent world; no map or seed screen follows.",
+                        20, 17 + rowHeight);
+                COLOR.unbind();
+                return true;
+            }
+
+            if (!bootstrap.nativeWorldPrepared()) {
+                COLOR.BLACK.render(renderer, 0, C.WIDTH(), 0, C.HEIGHT());
+            }
+            int panelX = 20;
+            int panelX2 = Math.min(C.WIDTH() - 20, 880);
+            COLOR.BLACK.render(renderer, panelX - 8, panelX2, 18, 92);
+            COLOR.WHITE35.renderFrame(renderer, panelX - 8, panelX2, 18, 92, 0, 1);
+            COLOR.ORANGE100.bind();
+            UI.FONT().S.render(renderer, "SYX KINGDOMS ONLINE", panelX, 28);
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer,
+                    "One fixed persistent 1000 x 1000 native Songs of Syx world", panelX, 50);
+            String status = client.simulationReady() ? bootstrap.phase() : client.status();
+            UI.FONT().S.render(renderer, status, panelX, 70);
+            COLOR.unbind();
+            renderFoundingPlacement(renderer, rowHeight);
+            renderTextPrompt(renderer);
+            return true;
+        }
+
+        private void renderFoundingPlacement(Renderer renderer, int rowHeight) {
+            if (!foundingPlacementActive || !bootstrap.nativeWorldPrepared()) {
+                return;
+            }
+            if (foundingWorldX >= 0) {
+                int[] point = bootstrap.screenPoint(foundingWorldX, foundingWorldY);
+                if (point != null) {
+                    int px = point[0];
+                    int py = point[1];
+                    COLOR.ORANGE100.render(renderer, px - 7, px + 8, py - 2, py + 3);
+                    COLOR.ORANGE100.render(renderer, px - 2, px + 3, py - 7, py + 8);
+                }
+            }
+            int panelX = 20;
+            int panelY = Math.max(110, C.HEIGHT() - 122);
+            int panelX2 = Math.min(C.WIDTH() - 20, 880);
+            COLOR.BLACK.render(renderer, panelX - 8, panelX2, panelY - 8, C.HEIGHT() - 12);
+            COLOR.WHITE35.renderFrame(renderer, panelX - 8, panelX2,
+                    panelY - 8, C.HEIGHT() - 12, 0, 1);
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer, foundingPlacementStatus, panelX, panelY);
+            if (foundingWorldX >= 0) {
+                UI.FONT().S.render(renderer,
+                        "Selected " + foundingWorldX + "," + foundingWorldY
+                                + " - the server will verify spacing and room for three neutral cities.",
+                        panelX, panelY + rowHeight);
+            }
+            UI.FONT().S.render(renderer,
+                    "Mouse wheel zooms; middle-drag or edge-scroll pans the native world.",
+                    panelX, panelY + rowHeight * 2);
+            COLOR.unbind();
+            foundingConfirmX1 = panelX;
+            foundingConfirmX2 = panelX + 210;
+            foundingConfirmY1 = panelY + rowHeight * 3 + 4;
+            foundingConfirmY2 = foundingConfirmY1 + 28;
+            renderButton(renderer, foundingConfirmX1, foundingConfirmX2,
+                    foundingConfirmY1, foundingConfirmY2, "Found kingdom here", foundingWorldX >= 0);
         }
 
         private void renderTextPrompt(Renderer renderer) {
@@ -443,6 +602,12 @@ public final class KingdomsMod implements SCRIPT {
                 COLOR.unbind();
                 x += widths[i] + 4;
             }
+            COLOR fill = inside(x, x + 92, y1, y2) ? COLOR.WHITE35 : COLOR.WHITE15;
+            fill.render(renderer, x, x + 92, y1, y2);
+            COLOR.WHITE65.renderFrame(renderer, x, x + 92, y1, y2, 0, 1);
+            COLOR.WHITE100.bind();
+            UI.FONT().S.render(renderer, "Edit Crest", x + 4, y1 + 3);
+            COLOR.unbind();
         }
 
         private void renderActiveTab(Renderer renderer) {
@@ -485,7 +650,8 @@ public final class KingdomsMod implements SCRIPT {
             addAction(renderer, actions, 20, 105, 500, 526, "CHAT_LOCAL", "Local", true);
             addAction(renderer, actions, 112, 207, 500, 526, "CHAT_GLOBAL", "Global", true);
             addAction(renderer, actions, 214, 309, 500, 526, "CHAT_HOUSE", "House", client.ownHouse() != null);
-            addAction(renderer, actions, 316, 411, 500, 526, "CHAT_MAIL", "Private mail", selected != null);
+            addAction(renderer, actions, 316, 411, 500, 526, "CHAT_MAIL", "Private mail",
+                    selected != null && !isNpc(selected));
         }
 
         private void renderHouseTab(Renderer renderer, List<UiAction> actions, int x, int y) {
@@ -528,14 +694,20 @@ public final class KingdomsMod implements SCRIPT {
             addAction(renderer, actions, 172, 252, 438, 462, "HOUSE_CREATE", "Create", own == null);
             addAction(renderer, actions, 258, 338, 438, 462, "HOUSE_APPLY", "Apply", own == null && viewed != null);
             addAction(renderer, actions, 344, 454, 438, 462, "HOUSE_ANNOUNCE", "Announcement", own != null && isHouseOfficer());
-            addAction(renderer, actions, 460, 540, 438, 462, "HOUSE_INVITE", "Invite", own != null && isHouseOfficer() && selectedCity(client.worldState()) != null);
+            addAction(renderer, actions, 460, 540, 438, 462, "HOUSE_INVITE", "Invite", own != null
+                    && isHouseOfficer() && selectedCity(client.worldState()) != null
+                    && !isNpc(selectedCity(client.worldState())));
             addAction(renderer, actions, 546, 630, 438, 462, "HOUSE_LEAVE", "Leave", own != null);
             addAction(renderer, actions, 20, 100, 474, 498, "REQUEST_PREV", "Req prev", request != null);
             addAction(renderer, actions, 106, 186, 474, 498, "REQUEST_NEXT", "Req next", request != null);
             addAction(renderer, actions, 192, 292, 474, 498, "REQUEST_ACCEPT", "Accept", request != null);
             addAction(renderer, actions, 298, 398, 474, 498, "REQUEST_REJECT", "Reject", request != null);
-            addAction(renderer, actions, 404, 504, 474, 498, "HOUSE_ROLE", "Set role", own != null && "SOVEREIGN".equals(membership.role()) && selectedCity(client.worldState()) != null);
-            addAction(renderer, actions, 510, 610, 474, 498, "HOUSE_KICK", "Kick", own != null && isHouseOfficer() && selectedCity(client.worldState()) != null);
+            addAction(renderer, actions, 404, 504, 474, 498, "HOUSE_ROLE", "Set role", own != null
+                    && "SOVEREIGN".equals(membership.role()) && selectedCity(client.worldState()) != null
+                    && !isNpc(selectedCity(client.worldState())));
+            addAction(renderer, actions, 510, 610, 474, 498, "HOUSE_KICK", "Kick", own != null
+                    && isHouseOfficer() && selectedCity(client.worldState()) != null
+                    && !isNpc(selectedCity(client.worldState())));
         }
 
         private void renderArmiesTab(Renderer renderer, List<UiAction> actions, int x, int y) {
@@ -570,8 +742,10 @@ public final class KingdomsMod implements SCRIPT {
             }
             COLOR.unbind();
             Messages.City selected = selectedCity(client.worldState());
-            addAction(renderer, actions, 20, 110, 500, 526, "ARMY_ATTACK", "Attack", selected != null && "WAR".equals(effectiveStance(selected.playerId())));
-            addAction(renderer, actions, 116, 226, 500, 526, "ARMY_REINFORCE", "Reinforce", selected != null && sameHouse(selected.playerId()));
+            addAction(renderer, actions, 20, 110, 500, 526, "ARMY_ATTACK", "Attack", selected != null
+                    && (isNpc(selected) || "WAR".equals(effectiveStance(selected.playerId()))));
+            addAction(renderer, actions, 116, 226, 500, 526, "ARMY_REINFORCE", "Reinforce", selected != null
+                    && !isNpc(selected) && sameHouse(selected.playerId()));
             addAction(renderer, actions, 232, 332, 500, 526, "WAR_DECLARE", "Declare war", client.ownHouse() != null && selectedHouse() != null);
             addAction(renderer, actions, 338, 438, 500, 526, "WAR_SURRENDER", "Surrender", ownActiveWar() != null);
             addAction(renderer, actions, 444, 534, 500, 526, "PROVINCE_CLAIM", "Claim/Annex", client.ownHouse() != null);
@@ -642,43 +816,127 @@ public final class KingdomsMod implements SCRIPT {
             COLOR.unbind();
         }
 
+        /** Draws online settlements over Songs of Syx's own world renderer. */
+        private void renderNativeWorldMarkers(Renderer renderer, Messages.WorldState state) {
+            hoveredPlayerId = null;
+            if (!(VIEW.current() instanceof WorldView worldView)) {
+                return;
+            }
+            GameWindow window = worldView.window;
+            Messages.City hovered = null;
+            for (Messages.City city : state.cities()) {
+                if (city.x() < 0 || city.y() < 0 || city.x() >= WORLD.TWIDTH() || city.y() >= WORLD.THEIGHT()) {
+                    continue;
+                }
+                int worldPixelX = city.x() * 64 + 32;
+                int worldPixelY = city.y() * 64 + 32;
+                int px = window.view().x1() + ((worldPixelX - window.pixels().x1()) >> window.zoomout());
+                int py = window.view().y1() + ((worldPixelY - window.pixels().y1()) >> window.zoomout());
+                if (!window.view().holdsPoint(px, py)) {
+                    continue;
+                }
+                COLOR nodeColor;
+                if (city.playerId().equals(client.ownPlayerId())) {
+                    nodeColor = COLOR.ORANGE100;
+                } else if (isNpc(city)) {
+                    nodeColor = COLOR.WHITE65;
+                } else if ("WAR".equals(effectiveStance(city.playerId()))) {
+                    nodeColor = COLOR.RED100;
+                } else if ("ALLY".equals(effectiveStance(city.playerId()))) {
+                    nodeColor = COLOR.BLUE100;
+                } else if (city.online()) {
+                    nodeColor = COLOR.GREEN100;
+                } else {
+                    nodeColor = COLOR.WHITE35;
+                }
+                nodeColor.renderFrame(renderer, px - 7, px + 8, py - 7, py + 8, 0, 2);
+                nodeColor.render(renderer, px - 2, px + 3, py - 2, py + 3);
+                if (Math.abs(mouseX - px) <= 8 && Math.abs(mouseY - py) <= 8) {
+                    hovered = city;
+                    hoveredPlayerId = city.playerId();
+                }
+            }
+            if (hovered != null) {
+                int tooltipX = Math.max(window.view().x1() + 4, Math.min(mouseX + 10, window.view().x2() - 360));
+                int tooltipY = Math.max(window.view().y1() + 4, Math.min(mouseY + 10, window.view().y2() - 24));
+                COLOR.BLACK.render(renderer, tooltipX, tooltipX + 350, tooltipY, tooltipY + 22);
+                COLOR.WHITE100.bind();
+                UI.FONT().S.render(renderer, hovered.cityName() + " - " + hovered.kingdomName()
+                        + " (" + hovered.playerName() + ")", tooltipX + 5, tooltipY + 3);
+                COLOR.unbind();
+            }
+        }
+
         private void renderSharedWorld(Renderer renderer, Messages.WorldState state,
                 int mapX1, int headerY, int mapWidth, int mapHeight, int rowHeight) {
+            renderSharedWorld(renderer, state, mapX1, headerY, mapWidth, mapHeight, rowHeight,
+                    new MapViewport(0, 0, state.worldWidth(), state.worldHeight()));
+        }
+
+        private void renderSharedWorld(Renderer renderer, Messages.WorldState state,
+                int mapX1, int headerY, int mapWidth, int mapHeight, int rowHeight,
+                MapViewport viewport) {
             int mapY1 = headerY + rowHeight;
             int mapX2 = mapX1 + mapWidth;
             int mapY2 = mapY1 + mapHeight;
             SharedWorldTerrain sharedTerrain = terrain(state.worldSeed());
-            for (int cellY = 0; cellY < SharedWorldTerrain.GRID_HEIGHT; cellY++) {
-                int cellY1 = mapY1 + cellY * mapHeight / SharedWorldTerrain.GRID_HEIGHT;
-                int cellY2 = mapY1 + (cellY + 1) * mapHeight / SharedWorldTerrain.GRID_HEIGHT;
-                for (int cellX = 0; cellX < SharedWorldTerrain.GRID_WIDTH; cellX++) {
-                    int cellX1 = mapX1 + cellX * mapWidth / SharedWorldTerrain.GRID_WIDTH;
-                    int cellX2 = mapX1 + (cellX + 1) * mapWidth / SharedWorldTerrain.GRID_WIDTH;
+            int viewportMaxX = viewport.minX() + viewport.spanX();
+            int viewportMaxY = viewport.minY() + viewport.spanY();
+            int firstCellX = Math.max(0, viewport.minX() / SharedWorldTerrain.CELL_SIZE);
+            int firstCellY = Math.max(0, viewport.minY() / SharedWorldTerrain.CELL_SIZE);
+            int lastCellX = Math.min(SharedWorldTerrain.GRID_WIDTH - 1,
+                    (viewportMaxX - 1) / SharedWorldTerrain.CELL_SIZE);
+            int lastCellY = Math.min(SharedWorldTerrain.GRID_HEIGHT - 1,
+                    (viewportMaxY - 1) / SharedWorldTerrain.CELL_SIZE);
+            for (int cellY = firstCellY; cellY <= lastCellY; cellY++) {
+                int worldY1 = Math.max(viewport.minY(), cellY * SharedWorldTerrain.CELL_SIZE);
+                int worldY2 = Math.min(viewportMaxY, (cellY + 1) * SharedWorldTerrain.CELL_SIZE);
+                int cellY1 = mapY1 + scaleViewportEdge(worldY1, viewport.minY(), viewport.spanY(), mapHeight);
+                int cellY2 = mapY1 + scaleViewportEdge(worldY2, viewport.minY(), viewport.spanY(), mapHeight);
+                for (int cellX = firstCellX; cellX <= lastCellX; cellX++) {
+                    int worldX1 = Math.max(viewport.minX(), cellX * SharedWorldTerrain.CELL_SIZE);
+                    int worldX2 = Math.min(viewportMaxX, (cellX + 1) * SharedWorldTerrain.CELL_SIZE);
+                    int cellX1 = mapX1 + scaleViewportEdge(worldX1, viewport.minX(), viewport.spanX(), mapWidth);
+                    int cellX2 = mapX1 + scaleViewportEdge(worldX2, viewport.minX(), viewport.spanX(), mapWidth);
                     terrainColor(sharedTerrain.cell(cellX, cellY))
-                            .render(renderer, cellX1, cellX2, cellY1, cellY2);
+                            .render(renderer, cellX1, Math.max(cellX1 + 1, cellX2),
+                                    cellY1, Math.max(cellY1 + 1, cellY2));
                 }
             }
             COLOR.WHITE35.renderFrame(renderer, mapX1, mapX2, mapY1, mapY2, 0, 1);
 
             int drawableWidth = Math.max(1, mapWidth - 10);
             int drawableHeight = Math.max(1, mapHeight - 10);
-            for (int sector = 1; sector < SharedWorld.LINEAR_SCALE; sector++) {
-                int worldCoordinate = sector * SharedWorld.BASE_GAME_TILE_DIMENSION;
-                int gridX = mapX1 + 5 + scale(worldCoordinate, state.worldWidth(), drawableWidth);
-                int gridY = mapY1 + 5 + scale(worldCoordinate, state.worldHeight(), drawableHeight);
-                COLOR.WHITE10.render(renderer, gridX, gridX + 1, mapY1 + 1, mapY2 - 1);
-                COLOR.WHITE10.render(renderer, mapX1 + 1, mapX2 - 1, gridY, gridY + 1);
+            for (int sector = 1; sector < SharedWorld.PROVINCE_GRID; sector++) {
+                int worldCoordinate = sector * SharedWorld.PROVINCE_TILE_DIMENSION;
+                if (worldCoordinate >= viewport.minX() && worldCoordinate < viewportMaxX) {
+                    int gridX = mapX1 + 5 + scaleViewport(worldCoordinate, viewport.minX(),
+                            viewport.spanX(), drawableWidth);
+                    COLOR.WHITE10.render(renderer, gridX, gridX + 1, mapY1 + 1, mapY2 - 1);
+                }
+                if (worldCoordinate >= viewport.minY() && worldCoordinate < viewportMaxY) {
+                    int gridY = mapY1 + 5 + scaleViewport(worldCoordinate, viewport.minY(),
+                            viewport.spanY(), drawableHeight);
+                    COLOR.WHITE10.render(renderer, mapX1 + 1, mapX2 - 1, gridY, gridY + 1);
+                }
             }
-            renderProvinceBorders(renderer, mapX1, mapY1, mapWidth, mapHeight);
-            renderArmies(renderer, state, mapX1, mapY1, drawableWidth, drawableHeight);
+            renderProvinceBorders(renderer, mapX1, mapY1, mapWidth, mapHeight, viewport);
+            renderArmies(renderer, state, mapX1, mapY1, drawableWidth, drawableHeight, viewport);
             Messages.City hovered = null;
             hoveredPlayerId = null;
             for (Messages.City city : state.cities()) {
-                int px = mapX1 + 5 + scale(city.x(), state.worldWidth(), drawableWidth);
-                int py = mapY1 + 5 + scale(city.y(), state.worldHeight(), drawableHeight);
+                if (!viewport.contains(city.x(), city.y())) {
+                    continue;
+                }
+                int px = mapX1 + 5 + scaleViewport(city.x(), viewport.minX(),
+                        viewport.spanX(), drawableWidth);
+                int py = mapY1 + 5 + scaleViewport(city.y(), viewport.minY(),
+                        viewport.spanY(), drawableHeight);
                 COLOR nodeColor;
                 if (city.playerId().equals(client.ownPlayerId())) {
                     nodeColor = COLOR.ORANGE100;
+                } else if (isNpc(city)) {
+                    nodeColor = COLOR.WHITE65;
                 } else if ("WAR".equals(effectiveStance(city.playerId()))) {
                     nodeColor = COLOR.RED100;
                 } else if ("ALLY".equals(effectiveStance(city.playerId()))) {
@@ -699,11 +957,18 @@ public final class KingdomsMod implements SCRIPT {
             UI.FONT().S.render(renderer,
                     "10x world " + state.worldWidth() + "x" + state.worldHeight()
                             + " - " + SharedWorld.SECTOR_COUNT + " base-map sectors - "
-                            + state.cities().size() + " cities",
+                            + state.cities().stream().filter(city -> !isNpc(city)).count() + " players + "
+                            + state.cities().stream().filter(RuntimeInstance::isNpc).count() + " neutral cities"
+                            + (viewport.spanX() < state.worldWidth() ? " - " + foundingMapZoom + "x zoom" : ""),
                     mapX1, headerY + 1);
             if (hovered != null) {
                 Messages.Province province = provinceAt(SharedWorld.sectorX(hovered.x()), SharedWorld.sectorY(hovered.y()));
-                String detail = hovered.cityName() + " - " + hovered.kingdomName()
+                String detail = isNpc(hovered)
+                        ? hovered.cityName() + " | neutral PvE level " + npcLevel(hovered)
+                        + " | garrison " + hovered.population() + " | treasury " + hovered.credits()
+                        + " | sector " + (SharedWorld.sectorX(hovered.x()) + 1) + ","
+                        + (SharedWorld.sectorY(hovered.y()) + 1) + " | " + hovered.x() + "," + hovered.y()
+                        : hovered.cityName() + " - " + hovered.kingdomName()
                         + " (" + hovered.playerName() + ")"
                         + " | " + (hovered.online() ? "online" : "offline")
                         + (protectedNow(hovered) ? " | protected " + protectionRemaining(hovered.protectionEndsEpochMillis()) : "")
@@ -725,30 +990,46 @@ public final class KingdomsMod implements SCRIPT {
             if (previewCity != null) {
                 CrestDesign preview = client.crest(previewCity.playerId());
                 if (preview != null) {
-                    int previewX = mapX2 - 72;
+                    int previewX = mapX2 - 104;
                     int previewY = mapY1 + 6;
-                    COLOR.BLACK.render(renderer, previewX - 3, previewX + 67, previewY - 3, previewY + 67);
-                    COLOR.WHITE35.renderFrame(renderer, previewX - 3, previewX + 67,
-                            previewY - 3, previewY + 67, 0, 1);
-                    renderCrest(renderer, preview, previewX, previewY, 2, false);
+                    COLOR.BLACK.render(renderer, previewX - 3, previewX + 99, previewY - 3, previewY + 99);
+                    COLOR.WHITE35.renderFrame(renderer, previewX - 3, previewX + 99,
+                            previewY - 3, previewY + 99, 0, 1);
+                    renderCrest(renderer, preview, previewX, previewY, 3, false);
                 }
             }
             COLOR.unbind();
         }
 
-        private void renderProvinceBorders(Renderer renderer, int mapX1, int mapY1, int mapWidth, int mapHeight) {
+        private void renderProvinceBorders(Renderer renderer, int mapX1, int mapY1,
+                int mapWidth, int mapHeight, MapViewport viewport) {
             for (Messages.Province province : client.provinces()) {
                 if (province.ownerHouseId().isBlank()) continue;
-                int px1 = mapX1 + province.x() * mapWidth / SharedWorld.LINEAR_SCALE;
-                int px2 = mapX1 + (province.x() + 1) * mapWidth / SharedWorld.LINEAR_SCALE;
-                int py1 = mapY1 + province.y() * mapHeight / SharedWorld.LINEAR_SCALE;
-                int py2 = mapY1 + (province.y() + 1) * mapHeight / SharedWorld.LINEAR_SCALE;
+                int worldX1 = province.x() * SharedWorld.BASE_GAME_TILE_DIMENSION;
+                int worldX2 = worldX1 + SharedWorld.BASE_GAME_TILE_DIMENSION;
+                int worldY1 = province.y() * SharedWorld.BASE_GAME_TILE_DIMENSION;
+                int worldY2 = worldY1 + SharedWorld.BASE_GAME_TILE_DIMENSION;
+                int viewportMaxX = viewport.minX() + viewport.spanX();
+                int viewportMaxY = viewport.minY() + viewport.spanY();
+                if (worldX2 <= viewport.minX() || worldX1 >= viewportMaxX
+                        || worldY2 <= viewport.minY() || worldY1 >= viewportMaxY) {
+                    continue;
+                }
+                worldX1 = Math.max(worldX1, viewport.minX());
+                worldX2 = Math.min(worldX2, viewportMaxX);
+                worldY1 = Math.max(worldY1, viewport.minY());
+                worldY2 = Math.min(worldY2, viewportMaxY);
+                int px1 = mapX1 + scaleViewportEdge(worldX1, viewport.minX(), viewport.spanX(), mapWidth);
+                int px2 = mapX1 + scaleViewportEdge(worldX2, viewport.minX(), viewport.spanX(), mapWidth);
+                int py1 = mapY1 + scaleViewportEdge(worldY1, viewport.minY(), viewport.spanY(), mapHeight);
+                int py2 = mapY1 + scaleViewportEdge(worldY2, viewport.minY(), viewport.spanY(), mapHeight);
                 int hash = province.ownerHouseId().hashCode();
                 ColorImp.TMP.set(70 + Math.floorMod(hash, 150),
                         70 + Math.floorMod(hash >>> 8, 150),
                         70 + Math.floorMod(hash >>> 16, 150))
-                        .renderFrame(renderer, px1 + 1, px2 - 1, py1 + 1, py2 - 1, 0, 2);
-                if (!province.occupierHouseId().isBlank()) {
+                        .renderFrame(renderer, px1 + 1, Math.max(px1 + 2, px2 - 1),
+                                py1 + 1, Math.max(py1 + 2, py2 - 1), 0, 2);
+                if (!province.occupierHouseId().isBlank() && px2 - px1 > 9 && py2 - py1 > 9) {
                     COLOR.RED100.renderFrame(renderer, px1 + 4, px2 - 4, py1 + 4, py2 - 4, 0, 1);
                 }
             }
@@ -765,7 +1046,9 @@ public final class KingdomsMod implements SCRIPT {
             COLOR.WHITE65.renderFrame(renderer, CREST_PANEL_X1, CREST_PANEL_X2,
                     CREST_PANEL_Y1, CREST_PANEL_Y2, 0, 2);
             COLOR.WHITE100.bind();
-            UI.FONT().S.render(renderer, (crestEditorForHouse ? "House" : "Kingdom")
+            String crestOwner = crestEditorForFounding ? "Founding kingdom"
+                    : (crestEditorForHouse ? "House" : "Kingdom");
+            UI.FONT().S.render(renderer, crestOwner
                     + " crest editor - 32x32 pixels - 16 palette slots",
                     CREST_PANEL_X1 + 12, CREST_PANEL_Y1 + 8);
             UI.FONT().S.render(renderer, "Left-drag paints | right-drag erases | slot 0 is transparent",
@@ -876,6 +1159,9 @@ public final class KingdomsMod implements SCRIPT {
             Messages.City selected = selectedCity(state);
             String selectedLine = selected == null
                     ? "Select another city node for mail and diplomacy."
+                    : isNpc(selected) ? "Selected neutral PvE city: " + selected.cityName()
+                            + " | level " + npcLevel(selected) + " | garrison " + selected.population()
+                            + " | treasury " + selected.credits()
                     : "Selected: " + selected.cityName() + " - " + selected.kingdomName()
                             + " (" + selected.playerName() + ") | relation "
                             + effectiveStance(selected.playerId()).toLowerCase()
@@ -900,11 +1186,11 @@ public final class KingdomsMod implements SCRIPT {
             warX2 = Math.min(x1 + width, warX1 + 52);
             renderButton(renderer, localChatX1, localChatX2, actionY1, actionY2, "Local", true);
             renderButton(renderer, chatX1, chatX2, actionY1, actionY2, "Global chat", true);
-            renderButton(renderer, mailX1, mailX2, actionY1, actionY2, "Mail", selected != null);
-            renderButton(renderer, neutralX1, neutralX2, actionY1, actionY2, "Neutral", selected != null);
-            renderButton(renderer, allyX1, allyX2, actionY1, actionY2, "Ally", selected != null);
+            renderButton(renderer, mailX1, mailX2, actionY1, actionY2, "Mail", selected != null && !isNpc(selected));
+            renderButton(renderer, neutralX1, neutralX2, actionY1, actionY2, "Neutral", selected != null && !isNpc(selected));
+            renderButton(renderer, allyX1, allyX2, actionY1, actionY2, "Ally", selected != null && !isNpc(selected));
             renderButton(renderer, warX1, warX2, actionY1, actionY2, "War", selected != null
-                    && client.ownHouse() != null && !sameHouse(selected.playerId()));
+                    && !isNpc(selected) && client.ownHouse() != null && !sameHouse(selected.playerId()));
 
             strategicY1 = actionY2 + 3;
             strategicY2 = strategicY1 + rowHeight + 2;
@@ -915,12 +1201,14 @@ public final class KingdomsMod implements SCRIPT {
             goodsX1 = armyX2 + 6;
             goodsX2 = Math.min(x1 + width, goodsX1 + 128);
             renderButton(renderer, transferX1, transferX2, strategicY1, strategicY2,
-                    "Transfer crowns", selected != null);
+                    "Transfer crowns", selected != null && !isNpc(selected));
             renderButton(renderer, armyX1, armyX2, strategicY1, strategicY2,
-                    "Send army", selected != null && !protectedNow(selected)
-                            && "WAR".equals(effectiveStance(selected.playerId())));
+                    isNpc(selected) ? "Attack NPC" : "Send army", selected != null
+                            && (isNpc(selected) || (!protectedNow(selected)
+                            && "WAR".equals(effectiveStance(selected.playerId())))));
             renderButton(renderer, goodsX1, goodsX2, strategicY1, strategicY2,
-                    "Send goods", selected != null && !"WAR".equals(effectiveStance(selected.playerId())));
+                    "Send goods", selected != null && !isNpc(selected)
+                            && !"WAR".equals(effectiveStance(selected.playerId())));
 
             int marketInfoY = strategicY2 + 3;
             Messages.MarketOffer offer = selectedMarketOffer();
@@ -959,7 +1247,8 @@ public final class KingdomsMod implements SCRIPT {
         }
 
         private void renderArmies(Renderer renderer, Messages.WorldState state,
-                int mapX1, int mapY1, int drawableWidth, int drawableHeight) {
+                int mapX1, int mapY1, int drawableWidth, int drawableHeight,
+                MapViewport viewport) {
             long now = System.currentTimeMillis();
             for (Messages.Army army : client.armies()) {
                 Messages.City owner = city(army.ownerPlayerId(), state);
@@ -972,8 +1261,15 @@ public final class KingdomsMod implements SCRIPT {
                         (now - army.departedEpochMillis()) / duration));
                 double worldX = owner.x() + (target.x() - owner.x()) * progress;
                 double worldY = owner.y() + (target.y() - owner.y()) * progress;
-                int px = mapX1 + 5 + scale((int) Math.round(worldX), state.worldWidth(), drawableWidth);
-                int py = mapY1 + 5 + scale((int) Math.round(worldY), state.worldHeight(), drawableHeight);
+                int roundedX = (int) Math.round(worldX);
+                int roundedY = (int) Math.round(worldY);
+                if (!viewport.contains(roundedX, roundedY)) {
+                    continue;
+                }
+                int px = mapX1 + 5 + scaleViewport(roundedX, viewport.minX(),
+                        viewport.spanX(), drawableWidth);
+                int py = mapY1 + 5 + scaleViewport(roundedY, viewport.minY(),
+                        viewport.spanY(), drawableHeight);
                 COLOR color = army.ownerPlayerId().equals(client.ownPlayerId()) ? COLOR.ORANGE150 : COLOR.RED100;
                 color.render(renderer, px - 2, px + 3, py - 2, py + 3);
             }
@@ -1167,10 +1463,10 @@ public final class KingdomsMod implements SCRIPT {
 
         private static COLOR terrainColor(SharedWorldTerrain.Terrain terrain) {
             return switch (terrain) {
-                case WATER -> COLOR.BLUEDARK;
-                case PLAINS -> COLOR.MEDIUM_BROWN;
-                case FOREST -> COLOR.DARK_GREEN;
-                case MOUNTAIN -> COLOR.WHITE35;
+                case WATER -> MAP_WATER;
+                case PLAINS -> MAP_PLAINS;
+                case FOREST -> MAP_FOREST;
+                case MOUNTAIN -> MAP_MOUNTAIN;
             };
         }
 
@@ -1179,6 +1475,44 @@ public final class KingdomsMod implements SCRIPT {
                 return 0;
             }
             return (int) Math.round((double) coordinate * drawableSize / (worldSize - 1.0));
+        }
+
+        private static int scaleViewport(int coordinate, int minimum, int span, int drawableSize) {
+            if (span <= 1) {
+                return 0;
+            }
+            return (int) Math.round((double) (coordinate - minimum) * drawableSize / (span - 1.0));
+        }
+
+        private static int scaleViewportEdge(int coordinate, int minimum, int span, int drawableSize) {
+            if (span <= 0) {
+                return 0;
+            }
+            return (int) Math.round((double) (coordinate - minimum) * drawableSize / span);
+        }
+
+        private MapViewport foundingViewport(Messages.WorldState state) {
+            int spanX = Math.max(1, state.worldWidth() / foundingMapZoom);
+            int spanY = Math.max(1, state.worldHeight() / foundingMapZoom);
+            int minX = Math.max(0, Math.min(state.worldWidth() - spanX,
+                    foundingMapCenterX - spanX / 2));
+            int minY = Math.max(0, Math.min(state.worldHeight() - spanY,
+                    foundingMapCenterY - spanY / 2));
+            foundingMapCenterX = minX + spanX / 2;
+            foundingMapCenterY = minY + spanY / 2;
+            return new MapViewport(minX, minY, spanX, spanY);
+        }
+
+        private void changeFoundingZoom(int newZoom) {
+            foundingMapZoom = Math.max(1, Math.min(8, newZoom));
+            foundingViewport(client.worldState());
+        }
+
+        private void panFoundingMap(int directionX, int directionY) {
+            MapViewport viewport = foundingViewport(client.worldState());
+            foundingMapCenterX += directionX * Math.max(1, viewport.spanX() / 2);
+            foundingMapCenterY += directionY * Math.max(1, viewport.spanY() / 2);
+            foundingViewport(client.worldState());
         }
 
         @Override
@@ -1204,11 +1538,15 @@ public final class KingdomsMod implements SCRIPT {
                 }
                 return;
             }
-            if (!client.simulationReady()) {
-                return;
-            }
             if (crestEditorOpen && crestEditor != null) {
                 handleCrestEditorClick(button);
+                return;
+            }
+            if (foundingPlacementActive) {
+                handleFoundingPlacementClick(button);
+                return;
+            }
+            if (!client.simulationReady()) {
                 return;
             }
             if (button != MButt.LEFT) {
@@ -1241,6 +1579,9 @@ public final class KingdomsMod implements SCRIPT {
                     return;
                 }
                 if (selected == null) {
+                    return;
+                }
+                if (isNpc(selected)) {
                     return;
                 }
                 if (insideX(mailX1, mailX2)) {
@@ -1283,12 +1624,13 @@ public final class KingdomsMod implements SCRIPT {
             if (selected == null || mouseY < strategicY1 || mouseY >= strategicY2) {
                 return;
             }
-            if (insideX(transferX1, transferX2)) {
+            if (insideX(transferX1, transferX2) && !isNpc(selected)) {
                 requestPositiveLong("Crowns to transfer to " + selected.cityName(),
                         amount -> client.transferCrowns(selected.playerId(), amount));
-            } else if (insideX(armyX1, armyX2) && !protectedNow(selected)
-                    && "WAR".equals(effectiveStance(selected.playerId()))) {
-                String warning = client.playerState().protectionEndsEpochMillis() > System.currentTimeMillis()
+            } else if (insideX(armyX1, armyX2) && (isNpc(selected) || (!protectedNow(selected)
+                    && "WAR".equals(effectiveStance(selected.playerId()))))) {
+                String warning = !isNpc(selected)
+                        && client.playerState().protectionEndsEpochMillis() > System.currentTimeMillis()
                         ? "WARNING: marching ends beginner protection. Levies against "
                         : "Levies to send against ";
                 requestPositiveLong(warning + selected.cityName(),
@@ -1299,10 +1641,41 @@ public final class KingdomsMod implements SCRIPT {
                                 client.sendArmy(selected.playerId(), (int) amount);
                             }
                         });
-            } else if (insideX(goodsX1, goodsX2) && !"WAR".equals(effectiveStance(selected.playerId()))) {
+            } else if (insideX(goodsX1, goodsX2) && !isNpc(selected)
+                    && !"WAR".equals(effectiveStance(selected.playerId()))) {
                 requestText("Send goods to " + selected.cityName() + " (RESOURCE_KEY AMOUNT)",
                         text -> queueResourceShipment(selected, text));
             }
+        }
+
+        private void handleFoundingPlacementClick(MButt button) {
+            if (button != MButt.LEFT) {
+                return;
+            }
+            if (inside(foundingConfirmX1, foundingConfirmX2, foundingConfirmY1, foundingConfirmY2)) {
+                if (foundingWorldX >= 0) {
+                    client.submitFounding(foundingRuler, foundingKingdom, foundingCapital,
+                            foundingWorldX, foundingWorldY);
+                    foundingPlacementActive = false;
+                    foundingPromptActive = false;
+                    foundingPlacementStatus = "Submitting the server-validated founding claim.";
+                }
+                return;
+            }
+            if (!bootstrap.nativeWorldPrepared() || !bootstrap.worldViewportContains(mouseX, mouseY)) {
+                return;
+            }
+            int worldX = bootstrap.hoveredWorldX();
+            int worldY = bootstrap.hoveredWorldY();
+            if (!bootstrap.canFoundCapital(worldX, worldY)) {
+                foundingWorldX = -1;
+                foundingWorldY = -1;
+                foundingPlacementStatus = "The native game cannot found a capital there. Choose another land region.";
+                return;
+            }
+            foundingWorldX = worldX;
+            foundingWorldY = worldY;
+            foundingPlacementStatus = "Location selected. Confirm it below or click elsewhere to move it.";
         }
 
         private boolean switchTabAtMouse() {
@@ -1313,9 +1686,17 @@ public final class KingdomsMod implements SCRIPT {
                 if (mouseX >= x && mouseX < x + widths[i]) {
                     activeTab = OnlineTab.values()[i];
                     tabActions = List.of();
+                    if (activeTab == OnlineTab.WORLD && !VIEW.world().isActive()) {
+                        VIEW.world().activate();
+                        GAME.Notify("Opened the persistent multiplayer world map. Press Tab to return to your city.");
+                    }
                     return true;
                 }
                 x += widths[i] + 4;
+            }
+            if (mouseX >= x && mouseX < x + 92 && client.simulationReady()) {
+                openCrestEditor(false);
+                return true;
             }
             return false;
         }
@@ -1428,10 +1809,23 @@ public final class KingdomsMod implements SCRIPT {
             }
             crestEditor = new CrestEditorModel(current == null ? importNativeCrest() : current);
             crestEditorForHouse = forHouse;
+            crestEditorForFounding = false;
             crestEditorOpen = true;
             GAME.Notify(current == null
                     ? "Imported the current Songs of Syx banner into the 32x32 crest editor"
                     : "Opened the synchronized " + (forHouse ? "House" : "kingdom") + " crest");
+        }
+
+        private void openFoundingCrestEditor(String ruler, String kingdom, String capital) {
+            foundingRuler = ruler;
+            foundingKingdom = kingdom;
+            foundingCapital = capital;
+            crestEditor = new CrestEditorModel(
+                    pendingFoundingCrest == null ? CrestDesign.blank() : pendingFoundingCrest);
+            crestEditorForHouse = false;
+            crestEditorForFounding = true;
+            crestEditorOpen = true;
+            GAME.Notify("Create the permanent 32x32, 16-color crest for " + kingdom);
         }
 
         private void handleCrestEditorClick(MButt button) {
@@ -1483,6 +1877,15 @@ public final class KingdomsMod implements SCRIPT {
                     GAME.WarnLight("A kingdom crest must contain at least one visible pixel");
                     return;
                 }
+                if (crestEditorForFounding) {
+                    pendingFoundingCrest = crestEditor.design();
+                    crestEditorOpen = false;
+                    crestEditor = null;
+                    crestEditorForFounding = false;
+                    beginFoundingPlacement(foundingRuler, foundingKingdom, foundingCapital);
+                    GAME.Notify("Founding crest saved; now choose the capital location");
+                    return;
+                }
                 String commandId = crestEditorForHouse
                         ? client.setHouseCrest(crestEditor.design()) : client.setCrest(crestEditor.design());
                 if (commandId.isBlank()) {
@@ -1492,8 +1895,13 @@ public final class KingdomsMod implements SCRIPT {
                 crestEditorOpen = false;
                 GAME.Notify((crestEditorForHouse ? "House" : "Kingdom") + " crest queued for server validation");
             } else if (inside(120, 210, 516, 540)) {
+                boolean cancelledFoundingCrest = crestEditorForFounding;
                 crestEditorOpen = false;
                 crestEditor = null;
+                crestEditorForFounding = false;
+                if (cancelledFoundingCrest) {
+                    cancelFoundingPrompt();
+                }
             }
         }
 
@@ -1605,14 +2013,21 @@ public final class KingdomsMod implements SCRIPT {
 
         private void beginFoundingPrompts() {
             foundingPromptActive = true;
+            foundingPlacementActive = false;
             String serverMessage = client.foundingMessage();
-            if (!serverMessage.isBlank()) {
-                GAME.Notify(serverMessage);
+            String status = client.status();
+            if ((!foundingRuler.isBlank() && !foundingKingdom.isBlank() && !foundingCapital.isBlank())
+                    && (status.startsWith("FOUNDING_LOCATION_")
+                    || status.startsWith("FOUNDING_CLUSTER_BLOCKED"))) {
+                beginFoundingPlacement(foundingRuler, foundingKingdom, foundingCapital);
+                foundingPlacementStatus = serverMessage.isBlank()
+                        ? "Choose another valid capital location." : serverMessage;
+                return;
             }
             requestFoundingName("Choose your ruler name (3-32 characters)", ruler ->
                     requestFoundingName("Choose your unique kingdom name", kingdom ->
                             requestFoundingName("Choose your capital city name", capital ->
-                                    requestPlacementReference(ruler, kingdom, capital))));
+                                    openFoundingCrestEditor(ruler, kingdom, capital))));
         }
 
         private void requestFoundingName(String title, java.util.function.Consumer<String> receiver) {
@@ -1627,22 +2042,19 @@ public final class KingdomsMod implements SCRIPT {
             }, this::cancelFoundingPrompt);
         }
 
-        private void requestPlacementReference(String ruler, String kingdom, String capital) {
-            textInput.open("Nearby kingdom name (leave blank for balanced placement)", "", value -> {
-                String placement = value.trim().replaceAll("\\s+", " ");
-                if (!placement.isEmpty() && !validFoundingName(placement)) {
-                    GAME.WarnLight("Nearby kingdom must use a valid 3-32 character kingdom name");
-                    cancelFoundingPrompt();
-                    return;
-                }
-                client.submitFounding(ruler, kingdom, capital, placement);
-                foundingPromptActive = false;
-                GAME.Notify("Kingdom founding claim submitted");
-            }, this::cancelFoundingPrompt);
+        private void beginFoundingPlacement(String ruler, String kingdom, String capital) {
+            foundingRuler = ruler;
+            foundingKingdom = kingdom;
+            foundingCapital = capital;
+            foundingWorldX = -1;
+            foundingWorldY = -1;
+            foundingPlacementStatus = "Click a plains or forest location for your capital.";
+            foundingPlacementActive = true;
         }
 
         private void cancelFoundingPrompt() {
             foundingPromptActive = false;
+            foundingPlacementActive = false;
             nextFoundingPromptAt = System.currentTimeMillis() + 5_000;
         }
 
@@ -1662,6 +2074,25 @@ public final class KingdomsMod implements SCRIPT {
 
         private static boolean protectedNow(Messages.City city) {
             return city.protectionEndsEpochMillis() > System.currentTimeMillis();
+        }
+
+        private static boolean isNpc(Messages.City city) {
+            return city != null && city.playerId().startsWith("npc-");
+        }
+
+        private static int npcLevel(Messages.City city) {
+            if (!isNpc(city)) {
+                return 0;
+            }
+            String name = city.playerName();
+            int separator = name.lastIndexOf(' ');
+            if (separator >= 0) {
+                try {
+                    return Integer.parseInt(name.substring(separator + 1));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            return 1;
         }
 
         private static String protectionRemaining(long endsEpochMillis) {
@@ -1804,6 +2235,13 @@ public final class KingdomsMod implements SCRIPT {
 
         @Override
         public void save(FilePutter file) {
+            if (Boolean.getBoolean("syxkingdoms.worldTemplateWrite")) {
+                file.i(4);
+                file.chars("");
+                file.chars(client == null ? SharedWorld.WORLD_ID : client.config().worldId());
+                file.l(0);
+                return;
+            }
             file.i(3);
             file.chars(client == null ? "" : client.ownPlayerId());
             file.chars(client == null ? "" : client.config().worldId());
@@ -1816,7 +2254,7 @@ public final class KingdomsMod implements SCRIPT {
             if (format == 1) {
                 return;
             }
-            if (format != 2 && format != 3) {
+            if (format != 2 && format != 3 && format != 4) {
                 setFatalOnlineError("SAVE_BINDING_UNSUPPORTED: this save uses an unknown multiplayer binding format");
                 return;
             }
@@ -1824,7 +2262,7 @@ public final class KingdomsMod implements SCRIPT {
             String savedWorldId = file.chars();
             long savedLedgerRevision = format == 3 ? file.l()
                     : (tradeLedger == null ? 0 : tradeLedger.revision());
-            if (client != null && (!client.ownPlayerId().equals(savedPlayerId)
+            if (format != 4 && client != null && (!client.ownPlayerId().equals(savedPlayerId)
                     || !client.config().worldId().equals(savedWorldId))) {
                 setFatalOnlineError("SAVE_IDENTITY_MISMATCH: this city belongs to a different multiplayer identity or world");
                 return;

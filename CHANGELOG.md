@@ -1,5 +1,111 @@
 # Changelog
 
+## Unreleased
+
+- Restored Songs of Syx V71's complete native world finalization on the stable
+  1000x1000 map so city shards receive valid road entry points and initialized
+  faction, army, mercenary, and statistics data before play.
+- Moved that expensive native finalization into the canonical packaged world
+  build. Normal joins now attach the player's kingdom to the nearest existing
+  region and never regenerate regions, roads, pathing, factions, or armies.
+- Suppressed V71's native region-centre town sprites in the dedicated online
+  launcher and neutralized its generated single-player factions. Only the
+  server's player cities and three-NPC clusters are visible and authoritative.
+- Replaced V71's repeated whole-map native road-group merger with a bounded
+  online finalizer. Native local roads and settlement entry points remain, while
+  cross-kingdom travel and connectivity stay server-authoritative.
+- Restored V71's Tab city/world toggle and made the overlay's World Map tab open
+  the native persistent world directly. Online markers remain server-owned and
+  the fixed city simulation continues at the enforced speed in either view.
+
+## 2026-08-21 - Stable 1000-square persistent world
+
+- Reduced the canonical native world from 2560×2560 to 1000×1000 after V71
+  watchdog and rendering tests showed the larger geometry was impractical.
+- Retained the complete normalized heightmap and 10×10 strategic province grid.
+- Set the fully allocation-tested capacity to 90 isolated kingdoms plus three
+  NPC cities each (360 city nodes total) while retaining the 64-tile player
+  separation rule.
+
+## 2026-08-21 - Native capital-region bootstrap
+
+- Added a lightweight 3x3 native player region at the server-approved capital.
+- Supplies V71 city mineral/terrain generation with a real player capital region
+  without running the full 2560x2560 single-player region and road generators.
+
+## 0.14.0 - 2026-08-21
+
+- Added the generated native 2560×2560 V71 world template based on the canonical
+  grayscale heightmap. Normal Multiplayer joins load this save directly and never
+  enter random map generation.
+- Expanded the exact-V71 online engine patch to raise the native world constructor
+  limit and global generation flooder to 2560, and to normalize heightmap samples
+  against 256 instead of the world width. The 2560 world now completes generation
+  and persists successfully.
+- Raised the online native world-map camera cap from zoom level 2 to level 4. This
+  is the farthest level that keeps V71's 16-pixel land tiles visible; the unusable
+  level 5 black-ground case is blocked. City and battle views keep their caps.
+- Inset the canonical heightmap behind a four-percent ocean border so native
+  generation preserves its outer coastline and islands instead of clipping them.
+- Replaced the native faction/banner modal in first-join flow with the online
+  32×32 crest editor, including all sixteen palette slots and a larger preview.
+- Preserved a verified 512×512 native template as a recovery fallback while the
+  2560×2560 template remains the canonical production world.
+- Added an opt-in online launcher agent for exact V71. It changes the root
+  **Play** entry to **Multiplayer** and starts a neutral, forced-online game
+  specification directly, bypassing Random Game and all single-player tweak
+  presets without modifying `SongsOfSyx.jar` or the normal single-player launch.
+- Fixed the dedicated server closing rejected sockets before their protocol error
+  could be delivered. First-join responses now include `FOUNDING_REQUIRED` plus a
+  complete public shared-map snapshot, covered by a wire integration test.
+- Added interactive capital founding on the shared map. The client collects names,
+  lets the player click and confirm a plains/forest coordinate, and the server
+  rejects occupied, unbuildable, too-close, or three-NPC-incompatible locations
+  without consuming a player slot.
+- Increased the deterministic strategy-map presentation from 40×40 to 160×160
+  terrain cells, enlarged coherent terrain features, and replaced near-black map
+  colors with readable water, plains, forest, and mountain colors. Empty V1 test
+  worlds migrate automatically; populated worlds retain strict fingerprint safety.
+- Replaced the broken overlay-on-top-of-the-vanilla-wizard startup with an
+  exact-V71 multiplayer bootstrap. The shared-world connection and founding
+  prompts now run from the generator-safe frame hook, and that hook also keeps
+  the authenticated session alive while native modal stages are present.
+- Made the multiplayer screen cover the vanilla wizard until the server accepts
+  the persistent kingdom. After the player chooses a gameplay species, the mod
+  skips native faction/banner customization, titles, random map selection,
+  capital placement, and the world-inspection/start screen.
+- Added automatic local-shard creation from one fixed V71 seed and deterministic
+  capital-site scan. Server-owned ruler, kingdom, and capital names are written
+  into the native game before its initial save, while the persistent 2560-square
+  strategic map remains the visible multiplayer world.
+- Replaced player-selected nearby/social founding with authoritative isolated
+  clusters and a 64-tile minimum distance between player capitals.
+- Added exactly three persistent neutral PvE cities beside every player capital,
+  with deterministic buildable placement, level 1-3 garrisons, treasuries, and
+  real-time regeneration.
+- Added neutral-city marches and server-resolved battles, survivor returns, crown
+  loot, persistent reports/events, and UI selection/actions. PvE requires no House
+  war and does not cancel beginner protection.
+- Upgraded the wire protocol to version 10 and persistent world format to 13;
+  older player worlds automatically receive their missing three-city NPC rings.
+- Removed the fourth founding prompt and made old clients that request social
+  placement fail without consuming a player slot.
+- Set and exhaustively allocation-tested the canonical capacity at 512 isolated
+  player clusters / 2,048 total strategic city nodes.
+
+## 0.13.1 - 2026-08-21
+
+- Disabled vanilla title-derived bonuses by clearing every selected title for the
+  entire online session.
+- Added an exact-V71 world-generator hook that bypasses the title-selection stage;
+  continuous clearing remains the fail-safe if the generator UI changes.
+- Corrected the mod author metadata to Victorp1811.
+- Fixed `run-server.ps1` so the documented execution-policy bypass command resolves
+  its default server configuration correctly.
+- Clarified that the persistent 2560×2560 world is the authoritative strategic
+  coordinate plane rendered by the multiplayer client, not a single vanilla world
+  allocation; Songs of Syx 0.71.44 hard-limits physical worlds to 512×512.
+
 ## 0.13.0 - 2026-08-20
 
 - Replaced every native modal multiplayer text prompt with a live overlay input

@@ -53,11 +53,11 @@ public record ServerConfig(
                 integer(properties, "CITY_SPACING", 8),
                 value(properties, "WORLD_SEED", SharedWorld.WORLD_SEED),
                 value(properties, "REQUIRED_GAME_VERSION", "0.71.44"),
-                value(properties, "REQUIRED_MOD_VERSION", "0.13.0"),
-                value(properties, "REQUIRED_MOD_MANIFEST", "Syx Kingdoms Online@0.13.0"),
+                value(properties, "REQUIRED_MOD_VERSION", "0.14.0"),
+                value(properties, "REQUIRED_MOD_MANIFEST", "Syx Kingdoms Online@0.14.0"),
                 longValue(properties, "TICK_MILLIS", 1000L),
                 doubleValue(properties, "FIXED_GAME_SPEED", SharedWorld.FIXED_GAME_SPEED),
-                integer(properties, "MAX_PLAYERS", 2048),
+                integer(properties, "MAX_PLAYERS", SharedWorld.MAX_PLAYER_CITIES),
                 longValue(properties, "BEGINNER_PROTECTION_MILLIS", 432_000_000L),
                 longValue(properties, "HEARTBEAT_TIMEOUT_MILLIS", 15_000L),
                 longValue(properties, "SAVE_INTERVAL_MILLIS", 5_000L)));
@@ -80,7 +80,7 @@ public record ServerConfig(
         if (config.worldWidth != SharedWorld.WIDTH || config.worldHeight != SharedWorld.HEIGHT) {
             throw new IllegalArgumentException("Syx Kingdoms shared worlds must be "
                     + SharedWorld.WIDTH + "x" + SharedWorld.HEIGHT
-                    + " (10x the base-game world-map width and height)");
+                    + " (the canonical persistent online world)");
         }
         if (config.citySpacing < 1 || config.citySpacing > Math.min(config.worldWidth, config.worldHeight)) {
             throw new IllegalArgumentException("CITY_SPACING is outside the supported range");
@@ -102,8 +102,9 @@ public record ServerConfig(
             throw new IllegalArgumentException("FIXED_GAME_SPEED is locked to "
                     + SharedWorld.FIXED_GAME_SPEED + " for the canonical online ruleset");
         }
-        if (config.maxPlayers < 1 || config.maxPlayers > 2048) {
-            throw new IllegalArgumentException("MAX_PLAYERS must be between 1 and 2048");
+        if (config.maxPlayers < 1 || config.maxPlayers > SharedWorld.MAX_PLAYER_CITIES) {
+            throw new IllegalArgumentException("MAX_PLAYERS must be between 1 and "
+                    + SharedWorld.MAX_PLAYER_CITIES + " for isolated four-city clusters");
         }
         long coordinateCapacity = (long) ((config.worldWidth - 1) / config.citySpacing + 1)
                 * ((config.worldHeight - 1) / config.citySpacing + 1);

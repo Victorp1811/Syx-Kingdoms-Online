@@ -20,7 +20,7 @@ import java.util.List;
 import java.util.Properties;
 
 final class WorldStore {
-    record LoadedWorld(long epochMillis, int nextSlot, List<PlayerRecord> players,
+    record LoadedWorld(long epochMillis, int nextSlot, List<PlayerRecord> players, List<NpcCityRecord> npcCities,
             long nextEventId, long nextCrestRevision, List<WorldEventRecord> events, List<ArmyRecord> armies,
             List<ShipmentRecord> shipments, List<DeliveryRecord> deliveries,
             List<MarketOfferRecord> marketOffers, List<HouseRecord> houses,
@@ -36,7 +36,7 @@ final class WorldStore {
     static LoadedWorld load(Path path, ServerConfig config) throws IOException {
         if (!Files.exists(path)) {
             long now = System.currentTimeMillis();
-            return new LoadedWorld(now, 0, List.of(), 1, 1,
+            return new LoadedWorld(now, 0, List.of(), List.of(), 1, 1,
                     List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
                     List.of(), List.of(), List.of(), List.of(), 1, now,
                     now + 30L * 86_400_000L, "");
@@ -50,15 +50,22 @@ final class WorldStore {
             throw new IOException("World file belongs to '" + storedWorldId + "', not '" + config.worldId() + "'");
         }
         int format = Integer.parseInt(p.getProperty("format", "1"));
-        if (format > 12) {
+        if (format > 13) {
             throw new IOException("World file format " + format + " is newer than this server supports");
         }
+        int storedWidth = config.worldWidth();
+        int storedHeight = config.worldHeight();
+        boolean geometryMigration = false;
         if (format >= 2) {
-            int storedWidth = Integer.parseInt(required(p, "world.width"));
-            int storedHeight = Integer.parseInt(required(p, "world.height"));
+            storedWidth = Integer.parseInt(required(p, "world.width"));
+            storedHeight = Integer.parseInt(required(p, "world.height"));
             int storedSpacing = Integer.parseInt(required(p, "world.citySpacing"));
             String storedSeed = required(p, "world.seed");
-            if (storedWidth != config.worldWidth() || storedHeight != config.worldHeight()
+            geometryMigration = storedWidth == 2560 && storedHeight == 2560
+                    && config.worldWidth() == 1000 && config.worldHeight() == 1000
+                    && storedSpacing == config.citySpacing() && storedSeed.equals(config.worldSeed());
+            if ((!geometryMigration && (storedWidth != config.worldWidth()
+                    || storedHeight != config.worldHeight()))
                     || storedSpacing != config.citySpacing() || !storedSeed.equals(config.worldSeed())) {
                 throw new IOException("World geometry/seed does not match server.properties; use a new world file or restore its original settings");
             }
@@ -67,24 +74,38 @@ final class WorldStore {
             int terrainGeneration = Integer.parseInt(required(p, "world.terrainGeneration"));
             String terrainFingerprint = required(p, "world.terrainFingerprint");
             String expectedFingerprint = new SharedWorldTerrain(config.worldSeed()).fingerprint();
-            if (terrainGeneration != SharedWorld.TERRAIN_GENERATION
-                    || !terrainFingerprint.equals(expectedFingerprint)) {
-                throw new IOException("Persistent world terrain fingerprint does not match this server build");
+            if (!geometryMigration && (terrainGeneration != SharedWorld.TERRAIN_GENERATION
+                    || !terrainFingerprint.equals(expectedFingerprint))) {
+                int existingPlayers = Integer.parseInt(p.getProperty("players.count", "0"));
+                int existingNpcCities = Integer.parseInt(p.getProperty("npcs.count", "0"));
+                if (existingPlayers > 0 || existingNpcCities > 0) {
+                    throw new IOException("Persistent world terrain fingerprint does not match this server build");
+                }
             }
         }
         long epoch = Long.parseLong(p.getProperty("world.epochMillis"));
         int nextSlot = Integer.parseInt(p.getProperty("world.nextSlot", "0"));
         long nextCrestRevision = Long.parseLong(p.getProperty("crests.nextRevision", "1"));
         List<PlayerRecord> players = new ArrayList<>();
+        List<int[]> migratedPlayerCoordinates = new ArrayList<>();
+        SharedWorldTerrain migrationTerrain = geometryMigration
+                ? new SharedWorldTerrain(config.worldSeed()) : null;
         int count = Integer.parseInt(p.getProperty("players.count", "0"));
         for (int i = 0; i < count; i++) {
             String prefix = "player." + i + ".";
             String id = decode(p.getProperty(prefix + "id"), "player id");
             String authHash = required(p, prefix + "authHash");
             int slot = Integer.parseInt(required(p, prefix + "slot"));
-            PlayerRecord player = new PlayerRecord(id, authHash, slot,
-                    Integer.parseInt(required(p, prefix + "x")),
-                    Integer.parseInt(required(p, prefix + "y")));
+            int x = Integer.parseInt(required(p, prefix + "x"));
+            int y = Integer.parseInt(required(p, prefix + "y"));
+            if (geometryMigration) {
+                int[] migrated = migratePlayerCoordinate(x, y, storedWidth, storedHeight,
+                        config, migrationTerrain, migratedPlayerCoordinates);
+                x = migrated[0];
+                y = migrated[1];
+                migratedPlayerCoordinates.add(migrated);
+            }
+            PlayerRecord player = new PlayerRecord(id, authHash, slot, x, y);
             player.playerName = decode(p.getProperty(prefix + "name", ""), "player name");
             player.kingdomName = decode(p.getProperty(prefix + "kingdom", ""), "kingdom name");
             player.cityName = decode(p.getProperty(prefix + "city", ""), "city name");
@@ -120,6 +141,26 @@ final class WorldStore {
             }
             players.add(player);
         }
+        // NPC city IDs are deterministic. The World constructor recreates each
+        // three-city cluster around its migrated patron on the new terrain.
+        int npcCount = geometryMigration ? 0
+                : boundedCount(p, "npcs.count", Protocol.MAX_CITIES_PER_STATE);
+        List<NpcCityRecord> npcCities = new ArrayList<>(npcCount);
+        for (int i = 0; i < npcCount; i++) {
+            String prefix = "npc." + i + ".";
+            NpcCityRecord npc = new NpcCityRecord(
+                    decode(required(p, prefix + "id"), "NPC city ID"),
+                    decode(required(p, prefix + "patronId"), "NPC patron player ID"),
+                    decode(required(p, prefix + "city"), "NPC city name"),
+                    Integer.parseInt(required(p, prefix + "x")),
+                    Integer.parseInt(required(p, prefix + "y")),
+                    Integer.parseInt(required(p, prefix + "level")),
+                    Integer.parseInt(required(p, prefix + "levies")),
+                    Long.parseLong(required(p, prefix + "crowns")),
+                    Long.parseLong(required(p, prefix + "economyUpdated")));
+            npc.levyProgressMinutes = Integer.parseInt(p.getProperty(prefix + "levyProgressMinutes", "0"));
+            npcCities.add(npc);
+        }
         long nextEventId = Long.parseLong(p.getProperty("events.nextId", "1"));
         List<WorldEventRecord> events = new ArrayList<>();
         int eventCount = Integer.parseInt(p.getProperty("events.count", "0"));
@@ -142,6 +183,12 @@ final class WorldStore {
             if (!type.matches("[A-Z_]{2,32}")) {
                 throw new IOException("Persistent world event has an invalid type");
             }
+            long value1 = Long.parseLong(p.getProperty(prefix + "value1", "0"));
+            long value2 = Long.parseLong(p.getProperty(prefix + "value2", "0"));
+            if (geometryMigration && "KINGDOM_FOUNDED".equals(type)) {
+                value1 = scaleCoordinate(value1, storedWidth, config.worldWidth());
+                value2 = scaleCoordinate(value2, storedHeight, config.worldHeight());
+            }
             events.add(new WorldEventRecord(eventId,
                     Long.parseLong(required(p, prefix + "epochMillis")), commandId, type,
                     decode(p.getProperty(prefix + "actorId", ""), "event actor ID"),
@@ -149,8 +196,7 @@ final class WorldStore {
                     decode(p.getProperty(prefix + "targetId", ""), "event target ID"),
                     decode(p.getProperty(prefix + "text", ""), "event text"),
                     decode(p.getProperty(prefix + "argument", ""), "event argument"),
-                    Long.parseLong(p.getProperty(prefix + "value1", "0")),
-                    Long.parseLong(p.getProperty(prefix + "value2", "0"))));
+                    value1, value2));
         }
         if (nextEventId < 1 || (previousEventId > 0 && nextEventId <= previousEventId)) {
             throw new IOException("Persistent next event ID is invalid");
@@ -294,7 +340,8 @@ final class WorldStore {
                     Integer.parseInt(required(p, prefix + "warScore"))));
         }
         long defaultSeasonStart = System.currentTimeMillis();
-        return new LoadedWorld(epoch, nextSlot, List.copyOf(players), nextEventId, nextCrestRevision,
+        return new LoadedWorld(epoch, nextSlot, List.copyOf(players), List.copyOf(npcCities),
+                nextEventId, nextCrestRevision,
                 List.copyOf(events), List.copyOf(armies), List.copyOf(shipments),
                 List.copyOf(deliveries), List.copyOf(offers), List.copyOf(houses),
                 List.copyOf(houseRequests), List.copyOf(provinces), List.copyOf(wars),
@@ -305,7 +352,8 @@ final class WorldStore {
     }
 
     static void save(Path path, ServerConfig config, long epochMillis, int nextSlot,
-            List<PlayerRecord> input, long nextEventId, long nextCrestRevision,
+            List<PlayerRecord> input, List<NpcCityRecord> inputNpcCities,
+            long nextEventId, long nextCrestRevision,
             List<WorldEventRecord> inputEvents,
             List<ArmyRecord> inputArmies, List<ShipmentRecord> inputShipments,
             List<DeliveryRecord> inputDeliveries, List<MarketOfferRecord> inputOffers,
@@ -314,7 +362,7 @@ final class WorldStore {
             List<BattleReportRecord> inputReports, int seasonNumber, long seasonStartsEpochMillis,
             long seasonEndsEpochMillis, String seasonWinnerHouseId) throws IOException {
         Properties p = new Properties();
-        p.setProperty("format", "12");
+        p.setProperty("format", "13");
         p.setProperty("world.id", config.worldId());
         p.setProperty("world.epochMillis", Long.toString(epochMillis));
         p.setProperty("world.nextSlot", Integer.toString(nextSlot));
@@ -359,6 +407,23 @@ final class WorldStore {
             p.setProperty(prefix + "houseRole", orEmpty(player.houseRole));
             p.setProperty(prefix + "houseJoined", Long.toString(player.houseJoinedEpochMillis));
             p.setProperty(prefix + "houseEligible", Long.toString(player.houseEligibleEpochMillis));
+        }
+        List<NpcCityRecord> npcCities = new ArrayList<>(inputNpcCities);
+        npcCities.sort(Comparator.comparing(npc -> npc.npcId));
+        p.setProperty("npcs.count", Integer.toString(npcCities.size()));
+        for (int i = 0; i < npcCities.size(); i++) {
+            NpcCityRecord npc = npcCities.get(i);
+            String prefix = "npc." + i + ".";
+            p.setProperty(prefix + "id", Protocol.encodeText(npc.npcId));
+            p.setProperty(prefix + "patronId", Protocol.encodeText(npc.patronPlayerId));
+            p.setProperty(prefix + "city", Protocol.encodeText(npc.cityName));
+            p.setProperty(prefix + "x", Integer.toString(npc.x));
+            p.setProperty(prefix + "y", Integer.toString(npc.y));
+            p.setProperty(prefix + "level", Integer.toString(npc.level));
+            p.setProperty(prefix + "levies", Integer.toString(npc.levies));
+            p.setProperty(prefix + "crowns", Long.toString(npc.crowns));
+            p.setProperty(prefix + "economyUpdated", Long.toString(npc.economyUpdatedEpochMillis));
+            p.setProperty(prefix + "levyProgressMinutes", Integer.toString(npc.levyProgressMinutes));
         }
         List<WorldEventRecord> events = new ArrayList<>(inputEvents);
         events.sort(Comparator.comparingLong(event -> event.eventId));
@@ -530,6 +595,53 @@ final class WorldStore {
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
         }
+    }
+
+    private static int[] migratePlayerCoordinate(int oldX, int oldY, int oldWidth, int oldHeight,
+            ServerConfig config, SharedWorldTerrain terrain, List<int[]> occupied) throws IOException {
+        int targetX = (int) scaleCoordinate(oldX, oldWidth, config.worldWidth());
+        int targetY = (int) scaleCoordinate(oldY, oldHeight, config.worldHeight());
+        int maxRadius = Math.max(config.worldWidth(), config.worldHeight());
+        for (int radius = 0; radius < maxRadius; radius++) {
+            int minX = Math.max(0, targetX - radius);
+            int maxX = Math.min(config.worldWidth() - 1, targetX + radius);
+            int minY = Math.max(0, targetY - radius);
+            int maxY = Math.min(config.worldHeight() - 1, targetY + radius);
+            for (int x = minX; x <= maxX; x++) {
+                if (migrationCandidate(x, minY, terrain, occupied)) return new int[] { x, minY };
+                if (maxY != minY && migrationCandidate(x, maxY, terrain, occupied)) {
+                    return new int[] { x, maxY };
+                }
+            }
+            for (int y = minY + 1; y < maxY; y++) {
+                if (migrationCandidate(minX, y, terrain, occupied)) return new int[] { minX, y };
+                if (maxX != minX && migrationCandidate(maxX, y, terrain, occupied)) {
+                    return new int[] { maxX, y };
+                }
+            }
+        }
+        throw new IOException("The 2560-square world contains a kingdom that cannot be migrated to 1000x1000");
+    }
+
+    private static boolean migrationCandidate(int x, int y, SharedWorldTerrain terrain, List<int[]> occupied) {
+        if (!terrain.canFoundCity(x, y)) {
+            return false;
+        }
+        long minimumSquared = (long) SharedWorld.PLAYER_CITY_MIN_DISTANCE
+                * SharedWorld.PLAYER_CITY_MIN_DISTANCE;
+        for (int[] other : occupied) {
+            long dx = (long) x - other[0];
+            long dy = (long) y - other[1];
+            if (dx * dx + dy * dy < minimumSquared) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static long scaleCoordinate(long coordinate, int oldSize, int newSize) {
+        long clamped = Math.max(0, Math.min(oldSize - 1L, coordinate));
+        return Math.round((double) clamped * (newSize - 1L) / (oldSize - 1L));
     }
 
     private static String required(Properties p, String key) throws IOException {

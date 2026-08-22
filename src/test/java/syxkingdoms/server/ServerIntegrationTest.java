@@ -3,6 +3,7 @@ package syxkingdoms.server;
 import syxkingdoms.protocol.LineIO;
 import syxkingdoms.protocol.Messages;
 import syxkingdoms.protocol.CrestDesign;
+import syxkingdoms.protocol.SharedWorld;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -16,16 +17,20 @@ public final class ServerIntegrationTest {
         Path temp = Files.createTempDirectory("syx-kingdoms-server-test-");
         try (KingdomsServer server = new KingdomsServer(WorldPersistenceTest.config(temp.resolve("world.properties")))) {
             server.start();
+            verifyFoundingPreview(server.port());
             try (TestClient alice = TestClient.connect(server.port(),
                     WorldPersistenceTest.hello("alice-id", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Alice", "Oakhold"));
                  TestClient bob = TestClient.connect(server.port(),
                     WorldPersistenceTest.hello("bob-id", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Bob", "Ashkeep"))) {
-                WorldPersistenceTest.check(alice.initial.cities().size() == 1, "first initial state");
-                WorldPersistenceTest.check(bob.initial.cities().size() == 2, "second initial state");
+                WorldPersistenceTest.check(alice.initial.cities().size() == 4,
+                        "first initial state has one player and three NPC cities");
+                WorldPersistenceTest.check(bob.initial.cities().size() == 8,
+                        "second initial state has two four-city clusters");
 
                 Sync aliceSync = alice.update(1, 321, 9000, List.of());
                 Messages.WorldState aliceView = aliceSync.world();
-                WorldPersistenceTest.check(aliceView.cities().size() == 2, "alice sees two cities");
+                WorldPersistenceTest.check(aliceView.cities().size() == 8,
+                        "alice sees two player clusters");
                 WorldPersistenceTest.check(aliceView.cities().stream().filter(Messages.City::online).count() == 2,
                         "alice sees two online cities");
                 Messages.City aliceCity = aliceView.cities().stream()
@@ -118,8 +123,8 @@ public final class ServerIntegrationTest {
                 WorldPersistenceTest.check(aliceHouseSync.results().getFirst().accepted()
                         && bobHouseSync.results().getFirst().accepted()
                         && bobHouseSync.houses().size() == 2 && bobHouseSync.houseMembers().size() == 2
-                        && bobHouseSync.provinces().size() == 100,
-                        "House membership and 100 provinces synchronize over the wire");
+                        && bobHouseSync.provinces().size() == SharedWorld.SECTOR_COUNT,
+                        "House membership and native-world provinces synchronize over the wire");
                 Messages.Command declareWar = command("alice-war", "DECLARE_HOUSE_WAR", "", "bob-house-0001", "");
                 Sync declared = alice.update(10, 321, 9000, List.of(declareWar));
                 WorldPersistenceTest.check(declared.results().getFirst().accepted()
@@ -148,6 +153,28 @@ public final class ServerIntegrationTest {
             }
         }
         System.out.println("ServerIntegrationTest: PASS");
+    }
+
+    private static void verifyFoundingPreview(int port) throws Exception {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", port), 3000);
+            socket.setSoTimeout(3000);
+            Messages.Hello blank = new Messages.Hello(syxkingdoms.protocol.Protocol.VERSION,
+                    "0.71.44", "0.14.0", "Syx Kingdoms Online@0.14.0", 0, 0,
+                    syxkingdoms.protocol.SharedWorld.WORLD_ID, "preview-player",
+                    "cccccccccccccccccccccccccccccccc", "", "", "", "");
+            LineIO.writeLine(socket.getOutputStream(), blank.encode());
+            Messages.Error error = Messages.Error.decode(LineIO.readLine(socket.getInputStream()));
+            WorldPersistenceTest.check("FOUNDING_REQUIRED".equals(error.code()),
+                    "server delivers the founding-required frame before closing");
+            Messages.WorldState.Header header = Messages.WorldState.decodeHeader(
+                    LineIO.readLine(socket.getInputStream()));
+            for (int i = 0; i < header.cityCount(); i++) {
+                Messages.City.decode(LineIO.readLine(socket.getInputStream()));
+            }
+            WorldPersistenceTest.check("STATE_END".equals(LineIO.readLine(socket.getInputStream())),
+                    "founding response includes a complete shared-map preview");
+        }
     }
 
     private static Messages.Command command(String id, String type, String target, String argument, String text) {

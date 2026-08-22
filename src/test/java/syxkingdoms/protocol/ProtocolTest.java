@@ -7,8 +7,8 @@ import java.util.List;
 
 public final class ProtocolTest {
     public static void main(String[] args) throws Exception {
-        Messages.Hello hello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.13.0",
-                "Syx Kingdoms Online@0.13.0", 0, 0, "world-one",
+        Messages.Hello hello = new Messages.Hello(Protocol.VERSION, "0.71.44", "0.14.0",
+                "Syx Kingdoms Online@0.14.0", 0, 0, "world-one",
                 "player-123", "a-secure-token-that-is-long-enough", "Ruler Name",
                 "Northern Realm", "Cité 北", "Friendly Realm");
         Messages.Hello decoded = Messages.Hello.decode(hello.encode());

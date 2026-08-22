@@ -462,8 +462,8 @@ public final class Messages {
                     Protocol.decodeText(f[4], "houseSovereign"),
                     Protocol.decodeText(f[5], "houseAnnouncement"),
                     Protocol.parseInt(f[6], "houseMemberCount", 1, 20),
-                    Protocol.parseInt(f[7], "houseCapitalX", -1, 9),
-                    Protocol.parseInt(f[8], "houseCapitalY", -1, 9),
+                    Protocol.parseInt(f[7], "houseCapitalX", -1, SharedWorld.PROVINCE_GRID - 1),
+                    Protocol.parseInt(f[8], "houseCapitalY", -1, SharedWorld.PROVINCE_GRID - 1),
                     Protocol.parseInt(f[9], "houseSeasonPoints", 0, 1_000_000_000),
                     hash, pixels, palette);
         }
@@ -543,8 +543,8 @@ public final class Messages {
         }
         public static Province decode(String line) throws ProtocolException {
             String[] f = Protocol.split(line, "PROVINCE", 8);
-            return new Province(Protocol.parseInt(f[1], "provinceX", 0, 9),
-                    Protocol.parseInt(f[2], "provinceY", 0, 9),
+            return new Province(Protocol.parseInt(f[1], "provinceX", 0, SharedWorld.PROVINCE_GRID - 1),
+                    Protocol.parseInt(f[2], "provinceY", 0, SharedWorld.PROVINCE_GRID - 1),
                     Protocol.decodeText(f[3], "provinceOwner"),
                     Protocol.decodeText(f[4], "provinceOccupier"),
                     Protocol.parseInt(f[5], "provinceInfluence", 0, 100),
@@ -628,8 +628,8 @@ public final class Messages {
                     Protocol.parseInt(f[9], "reportAttackerSurvivors", 0, 10_000),
                     Protocol.parseInt(f[10], "reportDefenderSurvivors", 0, 10_000),
                     Protocol.parseLong(f[11], "reportLoot", 0, 1_000_000_000L),
-                    Protocol.parseInt(f[12], "reportProvinceX", 0, 9),
-                    Protocol.parseInt(f[13], "reportProvinceY", 0, 9),
+                    Protocol.parseInt(f[12], "reportProvinceX", 0, SharedWorld.PROVINCE_GRID - 1),
+                    Protocol.parseInt(f[13], "reportProvinceY", 0, SharedWorld.PROVINCE_GRID - 1),
                     Protocol.parseInt(f[14], "reportWarScore", 0, 1_000_000));
         }
     }

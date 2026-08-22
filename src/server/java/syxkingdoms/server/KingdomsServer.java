@@ -15,6 +15,7 @@ import java.net.SocketTimeoutException;
 import java.time.Instant;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -23,6 +24,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class KingdomsServer implements AutoCloseable {
+    private static final Set<String> FOUNDING_ERROR_CODES = Set.of(
+            "FOUNDING_REQUIRED", "BAD_FOUNDING_NAME", "RESERVED_NAME",
+            "RULER_NAME_TAKEN", "KINGDOM_NAME_TAKEN", "CAPITAL_NAME_TAKEN",
+            "FOUNDING_LOCATION_REQUIRED", "FOUNDING_LOCATION_INVALID",
+            "FOUNDING_LOCATION_TAKEN", "FOUNDING_LOCATION_TOO_CLOSE",
+            "FOUNDING_CLUSTER_BLOCKED");
     private final ServerConfig config;
     private final World world;
     private final ExecutorService clients = Executors.newVirtualThreadPerTaskExecutor();
@@ -90,7 +97,7 @@ public final class KingdomsServer implements AutoCloseable {
     private void handle(Socket socket) {
         String playerId = null;
         String remote = String.valueOf(socket.getRemoteSocketAddress());
-        try (socket) {
+        try {
             socket.setTcpNoDelay(true);
             socket.setKeepAlive(true);
             socket.setSoTimeout((int) Math.min(Integer.MAX_VALUE, config.heartbeatTimeoutMillis()));
@@ -128,6 +135,9 @@ public final class KingdomsServer implements AutoCloseable {
             // Normal client disconnect.
         } catch (ProtocolException e) {
             sendErrorQuietly(socket, e.code(), e.getMessage());
+            if (FOUNDING_ERROR_CODES.contains(e.code())) {
+                sendWorldStateQuietly(socket, world.snapshot());
+            }
             log("Rejected " + remote + ": " + e.code() + " - " + e.getMessage());
         } catch (IOException e) {
             if (running.get()) {
@@ -140,6 +150,10 @@ public final class KingdomsServer implements AutoCloseable {
             world.leave(playerId);
             if (playerId != null) {
                 log("Left " + playerId + " from " + remote);
+            }
+            try {
+                socket.close();
+            } catch (IOException ignored) {
             }
         }
     }
@@ -207,6 +221,17 @@ public final class KingdomsServer implements AutoCloseable {
         }
     }
 
+    private static void sendWorldStateQuietly(Socket socket, Messages.WorldState state) {
+        try {
+            if (socket != null && !socket.isClosed()) {
+                for (String frame : Messages.WorldState.encodeFrames(state)) {
+                    LineIO.writeLine(socket.getOutputStream(), frame);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     private void saveWorld() {
         try {
             world.maintenance();
@@ -223,6 +248,7 @@ public final class KingdomsServer implements AutoCloseable {
         nextMetricsEpochMillis = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(5);
         World.Metrics metrics = world.metrics();
         log("Status registered=" + metrics.registeredPlayers()
+                + " npcCities=" + metrics.npcCities()
                 + " online=" + metrics.onlinePlayers()
                 + " events=" + metrics.retainedEvents()
                 + " armies=" + metrics.armies()

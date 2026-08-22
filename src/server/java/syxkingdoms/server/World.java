@@ -37,7 +37,10 @@ final class World {
     record JoinResult(PlayerRecord player, Messages.Welcome welcome) {
     }
 
-    record Metrics(int registeredPlayers, int onlinePlayers, int retainedEvents,
+    private record FoundingCluster(int[] playerCoordinate, List<Long> npcCoordinates) {
+    }
+
+    record Metrics(int registeredPlayers, int npcCities, int onlinePlayers, int retainedEvents,
             int armies, int shipments, int deliveries, int marketOffers, int houses, int wars) {
     }
 
@@ -68,6 +71,7 @@ final class World {
     private final ModerationStore moderation;
     private final long epochMillis;
     private final Map<String, PlayerRecord> players = new HashMap<>();
+    private final Map<String, NpcCityRecord> npcCities = new HashMap<>();
     private final Set<String> online = new HashSet<>();
     private final List<WorldEventRecord> events = new ArrayList<>();
     private final Map<String, Messages.CommandResult> processedCommands = new HashMap<>();
@@ -121,7 +125,6 @@ final class World {
             if (player.slot < 0 || player.slot >= loaded.nextSlot()
                     || player.x < 0 || player.x >= config.worldWidth()
                     || player.y < 0 || player.y >= config.worldHeight()
-                    || player.x % config.citySpacing() != 0 || player.y % config.citySpacing() != 0
                     || !terrain.canFoundCity(player.x, player.y)) {
                 throw new IOException("Invalid city slot/coordinate in world file for " + player.playerId);
             }
@@ -162,10 +165,48 @@ final class World {
                 throw new IOException("Incomplete founding profile in world file for " + player.playerId);
             }
         }
+        Map<String, Integer> npcCountByPatron = new HashMap<>();
+        for (NpcCityRecord npc : loaded.npcCities()) {
+            if (npc.npcId == null || !npc.npcId.matches("npc-[A-Za-z0-9-]{8,72}")
+                    || !players.containsKey(npc.patronPlayerId)
+                    || npc.cityName == null || npc.cityName.isBlank() || npc.cityName.length() > 48
+                    || npc.x < 0 || npc.x >= config.worldWidth()
+                    || npc.y < 0 || npc.y >= config.worldHeight()
+                    || npc.x % config.citySpacing() != 0 || npc.y % config.citySpacing() != 0
+                    || !terrain.canFoundCity(npc.x, npc.y)
+                    || npc.level < 1 || npc.level > SharedWorld.NPC_CITIES_PER_PLAYER
+                    || npc.levies < 0 || npc.levies > npcMaxLevies(npc.level)
+                    || npc.crowns < 0 || npc.crowns > npcMaxCrowns(npc.level)
+                    || npc.economyUpdatedEpochMillis < 0
+                    || npc.levyProgressMinutes < 0 || npc.levyProgressMinutes >= npcLevyMinutes(npc.level)
+                    || !occupiedCoordinates.add(npc.x + "," + npc.y)
+                    || npcCities.put(npc.npcId, npc) != null) {
+                throw new IOException("Invalid persistent NPC city: " + npc.npcId);
+            }
+            npcCountByPatron.merge(npc.patronPlayerId, 1, Integer::sum);
+        }
+        for (PlayerRecord player : players.values()) {
+            if (!player.foundingComplete()) {
+                continue;
+            }
+            int npcCount = npcCountByPatron.getOrDefault(player.playerId, 0);
+            if (npcCount == 0) {
+                try {
+                    createNpcCities(player, player.cityName, nearbyNpcCoordinates(player.x, player.y));
+                    dirty = true;
+                } catch (ProtocolException e) {
+                    throw new IOException("Could not migrate NPC cities for " + player.playerId, e);
+                }
+            } else if (npcCount != SharedWorld.NPC_CITIES_PER_PLAYER) {
+                throw new IOException("Player " + player.playerId + " must have exactly "
+                        + SharedWorld.NPC_CITIES_PER_PLAYER + " persistent NPC cities");
+            }
+        }
         events.addAll(loaded.events());
         for (WorldEventRecord event : events) {
             if (!players.containsKey(event.actorPlayerId)
-                    || (!event.targetPlayerId.isBlank() && !players.containsKey(event.targetPlayerId))) {
+                    || (!event.targetPlayerId.isBlank() && !players.containsKey(event.targetPlayerId)
+                    && !npcCities.containsKey(event.targetPlayerId))) {
                 throw new IOException("Persistent event refers to an unknown player: " + event.eventId);
             }
             restoreEventState(event);
@@ -173,11 +214,12 @@ final class World {
         Set<String> armyIds = new HashSet<>();
         for (ArmyRecord army : loaded.armies()) {
             if (!armyIds.add(army.armyId) || !players.containsKey(army.ownerPlayerId)
-                    || !players.containsKey(army.targetPlayerId)
+                    || (!players.containsKey(army.targetPlayerId) && !npcCities.containsKey(army.targetPlayerId))
                     || army.ownerPlayerId.equals(army.targetPlayerId)
                     || army.troops < 1 || army.troops > 10_000
                     || army.departedEpochMillis < 0 || army.arrivesEpochMillis < army.departedEpochMillis
-                    || (!"ATTACK".equals(army.mission) && !"REINFORCE".equals(army.mission))) {
+                    || (!"ATTACK".equals(army.mission) && !"REINFORCE".equals(army.mission)
+                    && !"NPC_ATTACK".equals(army.mission))) {
                 throw new IOException("Invalid persistent army: " + army.armyId);
             }
             armies.add(army);
@@ -253,15 +295,15 @@ final class World {
             houseRequests.add(request);
         }
         if (loaded.provinces().isEmpty()) {
-            for (int y = 0; y < SharedWorld.LINEAR_SCALE; y++) {
-                for (int x = 0; x < SharedWorld.LINEAR_SCALE; x++) {
+            for (int y = 0; y < SharedWorld.PROVINCE_GRID; y++) {
+                for (int x = 0; x < SharedWorld.PROVINCE_GRID; x++) {
                     provinces.put(provinceKey(x, y), new ProvinceRecord(x, y));
                 }
             }
         } else {
             for (ProvinceRecord province : loaded.provinces()) {
-                if (province.x < 0 || province.x >= SharedWorld.LINEAR_SCALE
-                        || province.y < 0 || province.y >= SharedWorld.LINEAR_SCALE
+                if (province.x < 0 || province.x >= SharedWorld.PROVINCE_GRID
+                        || province.y < 0 || province.y >= SharedWorld.PROVINCE_GRID
                         || provinces.put(provinceKey(province.x, province.y), province) != null
                         || (!province.ownerHouseId.isBlank() && !houses.containsKey(province.ownerHouseId))
                         || (!province.occupierHouseId.isBlank() && !houses.containsKey(province.occupierHouseId))) {
@@ -283,16 +325,17 @@ final class World {
         }
         for (ArmyRecord army : armies) {
             if (("ATTACK".equals(army.mission) && !army.warId.isBlank() && !warIds.contains(army.warId))
-                    || ("REINFORCE".equals(army.mission) && !army.warId.isBlank())) {
+                    || (("REINFORCE".equals(army.mission) || "NPC_ATTACK".equals(army.mission))
+                    && !army.warId.isBlank())) {
                 throw new IOException("Persistent army has an invalid war binding: " + army.armyId);
             }
         }
         Set<String> reportIds = new HashSet<>();
         for (BattleReportRecord report : loaded.reports()) {
             if (!reportIds.add(report.reportId) || !players.containsKey(report.attackerPlayerId)
-                    || !players.containsKey(report.defenderPlayerId)
-                    || report.provinceX < 0 || report.provinceX >= SharedWorld.LINEAR_SCALE
-                    || report.provinceY < 0 || report.provinceY >= SharedWorld.LINEAR_SCALE) {
+                    || (!players.containsKey(report.defenderPlayerId) && !npcCities.containsKey(report.defenderPlayerId))
+                    || report.provinceX < 0 || report.provinceX >= SharedWorld.PROVINCE_GRID
+                    || report.provinceY < 0 || report.provinceY >= SharedWorld.PROVINCE_GRID) {
                 throw new IOException("Invalid persistent battle report: " + report.reportId);
             }
             battleReports.add(report);
@@ -357,10 +400,19 @@ final class World {
                 if (players.size() >= config.maxPlayers()) {
                     throw new ProtocolException("WORLD_FULL", "This world has reached its player limit");
                 }
-                int[] coordinate = coordinateForFounding(hello.placementReference());
+                FoundingCluster cluster;
+                if (hello.placementReference() == null || hello.placementReference().isBlank()) {
+                    // Compatibility fallback for pre-placement clients and persisted test fixtures.
+                    cluster = clusterForFounding();
+                } else {
+                    int[] requestedLocation = foundingLocation(hello.placementReference());
+                    cluster = clusterForFounding(requestedLocation[0], requestedLocation[1]);
+                }
+                int[] coordinate = cluster.playerCoordinate();
                 player = new PlayerRecord(hello.playerId(), authHash, nextSlot, coordinate[0], coordinate[1]);
                 nextSlot++;
                 players.put(player.playerId, player);
+                createNpcCities(player, cityName, cluster.npcCoordinates());
             }
             long now = System.currentTimeMillis();
             player.playerName = playerName;
@@ -447,19 +499,23 @@ final class World {
     synchronized Messages.WorldState snapshot() {
         List<PlayerRecord> ordered = new ArrayList<>(players.values());
         ordered.sort(Comparator.comparingInt(player -> player.slot));
-        List<Messages.City> cities = new ArrayList<>(ordered.size());
+        List<Messages.City> cities = new ArrayList<>(ordered.size() + npcCities.size());
         for (PlayerRecord player : ordered) {
             cities.add(new Messages.City(player.playerId, player.playerName, player.kingdomName, player.cityName,
                     player.x, player.y, player.population, player.credits,
                     online.contains(player.playerId), player.lastSeenEpochMillis,
                     player.protectionEndsEpochMillis));
         }
+        npcCities.values().stream().sorted(Comparator.comparing(npc -> npc.npcId)).forEach(npc ->
+                cities.add(new Messages.City(npc.npcId, "NPC level " + npc.level,
+                        "Neutral settlements", npc.cityName, npc.x, npc.y, npc.levies, npc.crowns,
+                        false, npc.economyUpdatedEpochMillis, 0)));
         return new Messages.WorldState(tick(), System.currentTimeMillis(), config.fixedGameSpeed(),
                 config.worldWidth(), config.worldHeight(), config.worldSeed(), List.copyOf(cities));
     }
 
     synchronized Metrics metrics() {
-        return new Metrics(players.size(), online.size(), events.size(), armies.size(),
+        return new Metrics(players.size(), npcCities.size(), online.size(), events.size(), armies.size(),
                 shipments.size(), deliveries.size(), marketOffers.size(), houses.size(), wars.size());
     }
 
@@ -468,6 +524,7 @@ final class World {
             return;
         }
         WorldStore.save(config.worldFile(), config, epochMillis, nextSlot, new ArrayList<>(players.values()),
+                new ArrayList<>(npcCities.values()),
                 nextEventId, nextCrestRevision, new ArrayList<>(events), new ArrayList<>(armies),
                 new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers),
                 new ArrayList<>(houses.values()), new ArrayList<>(houseRequests),
@@ -478,6 +535,7 @@ final class World {
 
     synchronized void save() throws IOException {
         WorldStore.save(config.worldFile(), config, epochMillis, nextSlot, new ArrayList<>(players.values()),
+                new ArrayList<>(npcCities.values()),
                 nextEventId, nextCrestRevision, new ArrayList<>(events), new ArrayList<>(armies),
                 new ArrayList<>(shipments), new ArrayList<>(deliveries), new ArrayList<>(marketOffers),
                 new ArrayList<>(houses.values()), new ArrayList<>(houseRequests),
@@ -507,7 +565,23 @@ final class World {
             }
             PlayerRecord attacker = players.get(army.ownerPlayerId);
             PlayerRecord defender = players.get(army.targetPlayerId);
-            if (attacker == null || defender == null) {
+            if (attacker == null) {
+                iterator.remove();
+                dirty = true;
+                continue;
+            }
+            if ("NPC_ATTACK".equals(army.mission)) {
+                NpcCityRecord npc = npcCities.get(army.targetPlayerId);
+                if (npc == null) {
+                    attacker.levies = Math.min(10_000, attacker.levies + army.troops);
+                } else {
+                    resolveNpcBattle(army, attacker, npc, now);
+                }
+                iterator.remove();
+                dirty = true;
+                continue;
+            }
+            if (defender == null) {
                 iterator.remove();
                 dirty = true;
                 continue;
@@ -596,6 +670,35 @@ final class World {
         }
     }
 
+    private void resolveNpcBattle(ArmyRecord army, PlayerRecord attacker, NpcCityRecord npc, long now) {
+        int defendingLevies = Math.min(npc.levies, army.troops);
+        int attackerSurvivors = Math.max(0, army.troops - defendingLevies);
+        int defenderSurvivors = Math.max(0, npc.levies - army.troops);
+        npc.levies = defenderSurvivors;
+        long stolenCrowns = 0;
+        String outcome;
+        if (attackerSurvivors > 0) {
+            long dailyCap = 500L * npc.level;
+            long alreadyLooted = lootAgainstToday(attacker.playerId, npc.npcId, now);
+            long remainingCap = Math.max(0, dailyCap - alreadyLooted);
+            stolenCrowns = Math.min(Math.min(npc.crowns, attackerSurvivors * 5L), remainingCap);
+            stolenCrowns = Math.min(stolenCrowns, 1_000_000_000L - attacker.crowns);
+            npc.crowns -= stolenCrowns;
+            attacker.crowns += stolenCrowns;
+            attacker.levies = Math.min(10_000, attacker.levies + attackerSurvivors);
+            outcome = "NPC_ATTACKER_WIN";
+        } else {
+            outcome = "NPC_DEFENDER_WIN";
+        }
+        int provinceX = SharedWorld.sectorX(npc.x);
+        int provinceY = SharedWorld.sectorY(npc.y);
+        addReport(new BattleReportRecord(army.armyId, now, attacker.playerId, npc.npcId,
+                "", outcome, army.troops, defendingLevies, attackerSurvivors,
+                defenderSurvivors, stolenCrowns, provinceX, provinceY, 0));
+        appendSystemEvent("NPC_BATTLE", attacker, npc.npcId, outcome,
+                npc.cityName, attackerSurvivors, stolenCrowns);
+    }
+
     private SyncResult sync(String playerId, long afterEventId, long afterCrestRevision,
             List<Messages.CommandResult> results) {
         resolveArmies(System.currentTimeMillis());
@@ -657,9 +760,13 @@ final class World {
             return true;
         }
         PlayerRecord listener = players.get(playerId);
-        return listener != null
-                && SharedWorld.sectorX(listener.x) == event.value1
-                && SharedWorld.sectorY(listener.y) == event.value2;
+        if (listener == null) {
+            return false;
+        }
+        long dx = listener.x - event.value1;
+        long dy = listener.y - event.value2;
+        long radius = SharedWorld.LOCAL_CHAT_RADIUS;
+        return dx * dx + dy * dy <= radius * radius;
     }
 
     private List<Messages.CommandResult> applyCommands(String playerId, List<Messages.Command> commands) {
@@ -703,11 +810,9 @@ final class World {
             case "LOCAL_CHAT" -> {
                 requireBlankTarget(command);
                 String text = socialText(command.text(), "local chat message");
-                int sectorX = SharedWorld.sectorX(actor.x);
-                int sectorY = SharedWorld.sectorY(actor.y);
-                appendEvent(command, "LOCAL_CHAT", actor, "", text, "", sectorX, sectorY);
+                appendEvent(command, "LOCAL_CHAT", actor, "", text, "", actor.x, actor.y);
                 yield accepted(command, "LOCAL_MESSAGE_SENT",
-                        "Local message sent to province " + sectorX + "," + sectorY);
+                        "Local message sent within " + SharedWorld.LOCAL_CHAT_RADIUS + " world tiles");
             }
             case "SET_CREST" -> {
                 requireBlankTarget(command);
@@ -1046,17 +1151,7 @@ final class World {
                 yield accepted(command, "TRANSFER_RECORDED", amount + " crowns transferred to " + target.playerName);
             }
             case "SEND_ARMY" -> {
-                PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
                 long now = System.currentTimeMillis();
-                if (target.protectionEndsEpochMillis > now) {
-                    throw new ProtocolException("TARGET_PROTECTED",
-                            target.kingdomName + " is under beginner protection until "
-                                    + target.protectionEndsEpochMillis);
-                }
-                HouseWarRecord activeWar = activeWar(actor.houseId, target.houseId, now);
-                if (activeWar == null) {
-                    throw new ProtocolException("NOT_AT_WAR", "Armies require an active formal House war");
-                }
                 if (command.value1() < 1 || command.value1() > 10_000) {
                     throw new ProtocolException("BAD_ARMY_SIZE", "Army size must be between 1 and 10000");
                 }
@@ -1072,6 +1167,27 @@ final class World {
                     throw new ProtocolException("WORLD_ARMY_LIMIT", "The persistent world army capacity is currently full");
                 }
                 long departed = now;
+                NpcCityRecord npc = npcCities.get(command.targetPlayerId());
+                if (npc != null) {
+                    long arrives = departed + travelMillis(actor.x, actor.y, npc.x, npc.y);
+                    actor.levies -= troops;
+                    armies.add(new ArmyRecord(command.commandId(), actor.playerId, npc.npcId,
+                            troops, departed, arrives, "NPC_ATTACK", ""));
+                    appendEvent(command, "NPC_ARMY_SENT", actor, npc.npcId,
+                            npc.cityName, "PVE_EN_ROUTE", troops, arrives);
+                    yield accepted(command, "NPC_ARMY_SENT",
+                            troops + " levies are marching toward neutral " + npc.cityName);
+                }
+                PlayerRecord target = targetPlayer(actor, command.targetPlayerId());
+                if (target.protectionEndsEpochMillis > now) {
+                    throw new ProtocolException("TARGET_PROTECTED",
+                            target.kingdomName + " is under beginner protection until "
+                                    + target.protectionEndsEpochMillis);
+                }
+                HouseWarRecord activeWar = activeWar(actor.houseId, target.houseId, now);
+                if (activeWar == null) {
+                    throw new ProtocolException("NOT_AT_WAR", "Player armies require an active formal House war");
+                }
                 long arrives = departed + travelMillis(actor, target);
                 if (actor.protectionEndsEpochMillis > now) {
                     actor.protectionEndsEpochMillis = 0;
@@ -1550,7 +1666,7 @@ final class World {
     }
 
     private static int coordinate(long value, String field) throws ProtocolException {
-        if (value < 0 || value >= SharedWorld.LINEAR_SCALE) {
+        if (value < 0 || value >= SharedWorld.PROVINCE_GRID) {
             throw new ProtocolException("BAD_PROVINCE", field + " must be between 0 and 9");
         }
         return (int) value;
@@ -1801,7 +1917,11 @@ final class World {
     }
 
     private long travelMillis(PlayerRecord from, PlayerRecord to) {
-        double distance = Math.hypot((double) from.x - to.x, (double) from.y - to.y);
+        return travelMillis(from.x, from.y, to.x, to.y);
+    }
+
+    private long travelMillis(int fromX, int fromY, int toX, int toY) {
+        double distance = Math.hypot((double) fromX - toX, (double) fromY - toY);
         return Math.max(60_000L, Math.min(86_400_000L, (long) Math.ceil(distance * 1_000.0)));
     }
 
@@ -1817,6 +1937,20 @@ final class World {
             long levyMinutes = player.levyProgressMinutes + minutes;
             player.levies = (int) Math.min(10_000L, player.levies + levyMinutes / 5L);
             player.levyProgressMinutes = (int) (levyMinutes % 5L);
+            dirty = true;
+        }
+        for (NpcCityRecord npc : npcCities.values()) {
+            long elapsed = Math.max(0, now - npc.economyUpdatedEpochMillis);
+            long minutes = elapsed / 60_000L;
+            if (minutes <= 0) {
+                continue;
+            }
+            npc.economyUpdatedEpochMillis = now - elapsed % 60_000L;
+            npc.crowns = Math.min(npcMaxCrowns(npc.level), npc.crowns + minutes * npc.level);
+            long levyMinutes = npc.levyProgressMinutes + minutes;
+            int interval = npcLevyMinutes(npc.level);
+            npc.levies = (int) Math.min(npcMaxLevies(npc.level), npc.levies + levyMinutes / interval);
+            npc.levyProgressMinutes = (int) (levyMinutes % interval);
             dirty = true;
         }
     }
@@ -1981,47 +2115,144 @@ final class World {
         return result;
     }
 
-    private int[] coordinateForFounding(String placementReference) throws ProtocolException {
+    private FoundingCluster clusterForFounding() throws ProtocolException {
+        for (long coordinate : cityCoordinates) {
+            int[] decoded = decodeCoordinate(coordinate);
+            try {
+                return clusterForFounding(decoded[0], decoded[1]);
+            } catch (ProtocolException ignored) {
+                // Continue until a full isolated four-city cluster is found.
+            }
+        }
+        throw new ProtocolException("WORLD_FULL",
+                "No isolated four-city founding cluster remains on the persistent world");
+    }
+
+    private FoundingCluster clusterForFounding(int x, int y) throws ProtocolException {
         Set<Long> occupied = new HashSet<>();
         for (PlayerRecord existing : players.values()) {
             occupied.add(coordinateKey(existing.x, existing.y));
         }
-
-        PlayerRecord reference = null;
-        if (placementReference != null && !placementReference.isBlank()) {
-            String referenceName = foundingName(placementReference, "placement-reference kingdom");
-            String referenceKey = nameKey(referenceName);
-            reference = players.values().stream()
-                    .filter(PlayerRecord::foundingComplete)
-                    .filter(player -> referenceKey.equals(nameKey(player.kingdomName)))
-                    .findFirst()
-                    .orElseThrow(() -> new ProtocolException("PLACEMENT_REFERENCE_NOT_FOUND",
-                            "No existing kingdom named '" + referenceName + "' was found"));
+        for (NpcCityRecord npc : npcCities.values()) {
+            occupied.add(coordinateKey(npc.x, npc.y));
         }
+        if (x < 0 || x >= SharedWorld.WIDTH || y < 0 || y >= SharedWorld.HEIGHT
+                || !terrain.canFoundCity(x, y)) {
+            throw new ProtocolException("FOUNDING_LOCATION_INVALID",
+                    "Choose a plains or forest location inside the shared world");
+        }
+        if (occupied.contains(coordinateKey(x, y))) {
+            throw new ProtocolException("FOUNDING_LOCATION_TAKEN", "Another city already occupies that location");
+        }
+        long playerMinimumSquared = (long) SharedWorld.PLAYER_CITY_MIN_DISTANCE
+                * SharedWorld.PLAYER_CITY_MIN_DISTANCE;
+        boolean isolated = players.values().stream()
+                .allMatch(player -> distanceSquared(x, y, player.x, player.y) >= playerMinimumSquared);
+        if (!isolated) {
+            throw new ProtocolException("FOUNDING_LOCATION_TOO_CLOSE",
+                    "New capitals must be at least " + SharedWorld.PLAYER_CITY_MIN_DISTANCE
+                            + " shared-world tiles from another player");
+        }
+        try {
+            return new FoundingCluster(new int[] { x, y }, nearbyNpcCoordinates(x, y));
+        } catch (ProtocolException e) {
+            throw new ProtocolException("FOUNDING_CLUSTER_BLOCKED",
+                    "Choose a more open location that can support three nearby neutral cities");
+        }
+    }
 
-        long selected = -1;
-        long closestDistance = Long.MAX_VALUE;
+    private static int[] foundingLocation(String input) throws ProtocolException {
+        if (input == null || input.isBlank()) {
+            throw new ProtocolException("FOUNDING_LOCATION_REQUIRED",
+                    "Select your capital location on the shared-world map");
+        }
+        String[] parts = input.trim().split(",", -1);
+        try {
+            if (parts.length != 2) throw new NumberFormatException();
+            return new int[] { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) };
+        } catch (NumberFormatException e) {
+            throw new ProtocolException("FOUNDING_LOCATION_INVALID",
+                    "The requested shared-world coordinate is invalid");
+        }
+    }
+
+    private List<Long> nearbyNpcCoordinates(int playerX, int playerY) throws ProtocolException {
+        Set<Long> occupied = new HashSet<>();
+        for (PlayerRecord player : players.values()) {
+            occupied.add(coordinateKey(player.x, player.y));
+        }
+        for (NpcCityRecord npc : npcCities.values()) {
+            occupied.add(coordinateKey(npc.x, npc.y));
+        }
+        occupied.add(coordinateKey(playerX, playerY));
+        long minimumSquared = (long) SharedWorld.NPC_CITY_MIN_DISTANCE * SharedWorld.NPC_CITY_MIN_DISTANCE;
+        long maximumSquared = (long) SharedWorld.NPC_CITY_MAX_DISTANCE * SharedWorld.NPC_CITY_MAX_DISTANCE;
+        List<Long> selected = new ArrayList<>(SharedWorld.NPC_CITIES_PER_PLAYER);
         for (long coordinate : cityCoordinates) {
             if (occupied.contains(coordinate)) {
                 continue;
             }
-            if (reference == null) {
-                return decodeCoordinate(coordinate);
-            }
             int x = (int) (coordinate >>> 32);
             int y = (int) coordinate;
-            long dx = (long) x - reference.x;
-            long dy = (long) y - reference.y;
-            long distance = dx * dx + dy * dy;
-            if (distance < closestDistance) {
-                selected = coordinate;
-                closestDistance = distance;
+            long anchorDistance = distanceSquared(x, y, playerX, playerY);
+            if (anchorDistance < minimumSquared || anchorDistance > maximumSquared) {
+                continue;
+            }
+            boolean clearOfOtherPlayers = players.values().stream()
+                    .filter(player -> player.x != playerX || player.y != playerY)
+                    .allMatch(player -> distanceSquared(x, y, player.x, player.y) >= maximumSquared);
+            if (!clearOfOtherPlayers || selected.stream().anyMatch(other -> {
+                int otherX = (int) (other >>> 32);
+                int otherY = (int) (long) other;
+                return distanceSquared(x, y, otherX, otherY) < minimumSquared;
+            })) {
+                continue;
+            }
+            selected.add(coordinate);
+            if (selected.size() == SharedWorld.NPC_CITIES_PER_PLAYER) {
+                return List.copyOf(selected);
             }
         }
-        if (selected >= 0) {
-            return decodeCoordinate(selected);
+        throw new ProtocolException("WORLD_FULL", "This location cannot support three nearby neutral cities");
+    }
+
+    private void createNpcCities(PlayerRecord player, String capitalName, List<Long> coordinates)
+            throws ProtocolException {
+        if (coordinates.size() != SharedWorld.NPC_CITIES_PER_PLAYER) {
+            throw new ProtocolException("SERVER_ERROR", "A founding cluster must contain exactly three NPC cities");
         }
-        throw new ProtocolException("WORLD_FULL", "No buildable shared-world city coordinates remain");
+        String[] suffixes = { "Freehold", "Watch", "Redoubt" };
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < coordinates.size(); i++) {
+            int level = i + 1;
+            int[] coordinate = decodeCoordinate(coordinates.get(i));
+            String npcId = "npc-" + player.playerId + "-" + level;
+            String cityName = capitalName + " " + suffixes[i];
+            NpcCityRecord npc = new NpcCityRecord(npcId, player.playerId, cityName,
+                    coordinate[0], coordinate[1], level, 40 * level,
+                    500L * level, now);
+            if (npcCities.putIfAbsent(npcId, npc) != null) {
+                throw new ProtocolException("SERVER_ERROR", "Duplicate NPC city ID while founding a kingdom");
+            }
+        }
+    }
+
+    private static long distanceSquared(int x1, int y1, int x2, int y2) {
+        long dx = (long) x1 - x2;
+        long dy = (long) y1 - y2;
+        return dx * dx + dy * dy;
+    }
+
+    private static int npcMaxLevies(int level) {
+        return 200 * level;
+    }
+
+    private static long npcMaxCrowns(int level) {
+        return 2_000L * level;
+    }
+
+    private static int npcLevyMinutes(int level) {
+        return Math.max(2, 6 - level);
     }
 
     private static long coordinateKey(int x, int y) {

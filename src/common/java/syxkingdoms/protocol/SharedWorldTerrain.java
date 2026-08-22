@@ -1,5 +1,10 @@
 package syxkingdoms.protocol;
 
+import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.io.InputStream;
+import javax.imageio.ImageIO;
+
 public final class SharedWorldTerrain {
     public enum Terrain {
         WATER,
@@ -8,9 +13,10 @@ public final class SharedWorldTerrain {
         MOUNTAIN
     }
 
-    public static final int CELL_SIZE = 64;
-    public static final int GRID_WIDTH = SharedWorld.WIDTH / CELL_SIZE;
-    public static final int GRID_HEIGHT = SharedWorld.HEIGHT / CELL_SIZE;
+    /** Sixteen shared tiles per rendered cell keeps geography readable on the wire. */
+    public static final int CELL_SIZE = 16;
+    public static final int GRID_WIDTH = (SharedWorld.WIDTH + CELL_SIZE - 1) / CELL_SIZE;
+    public static final int GRID_HEIGHT = (SharedWorld.HEIGHT + CELL_SIZE - 1) / CELL_SIZE;
 
     private final long seedHash;
     private final Terrain[] cells = new Terrain[GRID_WIDTH * GRID_HEIGHT];
@@ -20,10 +26,22 @@ public final class SharedWorldTerrain {
             throw new IllegalArgumentException("Shared-world terrain seed cannot be blank");
         }
         seedHash = hashSeed(seed);
-        for (int y = 0; y < GRID_HEIGHT; y++) {
-            for (int x = 0; x < GRID_WIDTH; x++) {
-                cells[x + y * GRID_WIDTH] = generate(x, y);
+        try (InputStream input = SharedWorldTerrain.class.getResourceAsStream(SharedWorld.HEIGHTMAP_RESOURCE)) {
+            if (input == null) {
+                throw new IllegalStateException("Canonical online heightmap is missing: "
+                        + SharedWorld.HEIGHTMAP_RESOURCE);
             }
+            BufferedImage heightmap = ImageIO.read(input);
+            if (heightmap == null || heightmap.getWidth() != heightmap.getHeight()) {
+                throw new IllegalStateException("Canonical online heightmap must be a square PNG");
+            }
+            for (int y = 0; y < GRID_HEIGHT; y++) {
+                for (int x = 0; x < GRID_WIDTH; x++) {
+                    cells[x + y * GRID_WIDTH] = generate(x, y, heightmap);
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not read the canonical online heightmap", e);
         }
     }
 
@@ -69,25 +87,18 @@ public final class SharedWorldTerrain {
         return Long.toUnsignedString(hash, 16);
     }
 
-    private Terrain generate(int cellX, int cellY) {
-        int total = 0;
-        int weights = 0;
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                int weight = 3 - Math.max(Math.abs(dx), Math.abs(dy));
-                total += sample(seedHash, cellX + dx, cellY + dy) * weight;
-                weights += weight;
-            }
-        }
-        int broadElevation = total / weights;
-        int detail = sample(seedHash ^ 0x6A09E667F3BCC909L, cellX, cellY);
-        int elevation = (broadElevation * 3 + detail) / 4;
+    private Terrain generate(int cellX, int cellY, BufferedImage heightmap) {
+        int imageX = Math.min(heightmap.getWidth() - 1,
+                (int) (((long) cellX * 2 + 1) * heightmap.getWidth() / (GRID_WIDTH * 2L)));
+        int imageY = Math.min(heightmap.getHeight() - 1,
+                (int) (((long) cellY * 2 + 1) * heightmap.getHeight() / (GRID_HEIGHT * 2L)));
+        int elevation = (heightmap.getRGB(imageX, imageY) >>> 8) & 0xFF;
         int moisture = sample(seedHash ^ 0xBB67AE8584CAA73BL, cellX, cellY);
 
-        if (elevation < 110) {
+        if (elevation < 72) {
             return Terrain.WATER;
         }
-        if (elevation > 160) {
+        if (elevation > 205) {
             return Terrain.MOUNTAIN;
         }
         if (moisture > 138) {

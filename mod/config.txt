@@ -7,8 +7,9 @@ SERVER_PORT = 49720
 # Fixed canonical world; changing this value blocks the client from starting.
 WORLD_ID = syx-kingdoms-one-world
 
-# On first connection, the game prompts for a unique ruler, kingdom, capital,
-# and optional nearby kingdom. The server stores that profile permanently.
+# On first connection, the game prompts for a unique ruler, kingdom, and capital.
+# The server stores that profile and assigns an isolated four-city cluster:
+# the player capital plus three nearby neutral PvE settlements.
 
 # Identity is generated once in the Songs of Syx application-data folder.
 # Set RESET_IDENTITY = true for one launch only if you intentionally need a new city.
