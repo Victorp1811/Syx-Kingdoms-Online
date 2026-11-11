@@ -24,6 +24,15 @@ $javac = (Get-Command javac -ErrorAction Stop).Source
 & $javac --release 21 -encoding UTF-8 -d $classes @sources
 if ($LASTEXITCODE -ne 0) { throw "Server test compilation failed with exit code $LASTEXITCODE." }
 
+$canonicalHeightmap = Join-Path $root 'mod\V71\assets\sprite\world\generatorMaps\Syx_Kingdoms_Online.png'
+if (-not (Test-Path -LiteralPath $canonicalHeightmap -PathType Leaf)) {
+    throw "Canonical online heightmap is missing: $canonicalHeightmap"
+}
+$heightmapResources = New-Item -ItemType Directory `
+    -Path (Join-Path $classes 'syxkingdoms\world') -Force
+Copy-Item -LiteralPath $canonicalHeightmap `
+    -Destination (Join-Path $heightmapResources.FullName 'Syx_Kingdoms_Online.png') -Force
+
 foreach ($test in @(
     'syxkingdoms.protocol.ProtocolTest',
     'syxkingdoms.server.WorldPersistenceTest',
