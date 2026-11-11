@@ -58,11 +58,14 @@ The V9 wire protocol uses bounded UTF-8, tab-separated frames with base64url tex
 fields. On connection, a client authenticates its stable player ID and token and
 reports its exact game, client, and active-mod versions. The client refuses to
 connect when another mod is active, and the server independently enforces the
-required manifest. A new identity first submits a ruler, kingdom, capital, and
-optional nearby-kingdom reference. The server normalizes and uniquely reserves
-the names, selects an unoccupied buildable coordinate, and creates the player in
-one synchronized operation. Returning identities use the stored authoritative
-profile rather than client configuration. Pre-V0.6 players retain their existing
+required manifest. A new identity submits ruler, kingdom, and capital names
+with a requested capital coordinate from the shared map. The server normalizes
+and uniquely reserves the names, validates the coordinate and its isolated
+four-city cluster, and creates the player in one synchronized operation.
+Automatic placement remains a compatibility fallback for clients and test
+fixtures that omit a coordinate; nearby-friend placement is not enabled.
+Returning identities use the stored authoritative profile rather than client
+configuration. Pre-V0.6 players retain their existing
 coordinate and complete the same profile on their next login. The server returns the
 authoritative world dimensions, seed, tick settings, and sends a roster after each
 heartbeat. World persistence uses a temporary file plus atomic replacement where
@@ -153,8 +156,9 @@ continues at 1x while the player types.
     prompts with hotkey capture, plus release-gating coverage for 48 clients,
     eight Houses, four wars, six restarts, reconnect storms, command replay, and
     thousands of synchronization updates.
-15. **Player clusters and neutral PvE (implemented):** verified 512-player
-    allocation, exactly three levelled neutral cities per player, persistent NPC
+15. **Player clusters and neutral PvE (implemented):** a configured capacity of
+    90 player kingdoms and 270 neutral cities with 64-tile player separation,
+    exactly three levelled neutral cities per player, persistent NPC
     economy/garrisons, PvE marches, loot, reports, regeneration, and protocol/world
     migrations.
 

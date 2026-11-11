@@ -1,5 +1,13 @@
 # Syx Kingdoms Online
 
+**Experimental V0.14 vertical slice** · Songs of Syx V71 · Java 21
+
+[Build](#build) · [Local two-player test](#local-two-player-test) ·
+[Repository guide](#repository-guide) · [Architecture](ARCHITECTURE.md) ·
+[Online rules](ONLINE_RULES.md) · [Deployment](DEPLOYMENT.md) ·
+[Changelog](CHANGELOG.md) ·
+[CI results](https://github.com/Victorp1811/Syx-Kingdoms-Online/actions/workflows/server-tests.yml)
+
 Syx Kingdoms Online is an experimental persistent multiplayer layer for Songs of
 Syx. It is aimed at a Stronghold Kingdoms-style structure: every player owns and
 simulates a separate city, while a dedicated server owns the shared world clock,
@@ -12,7 +20,7 @@ This repository currently contains the V0.14 playable shared-world vertical slic
 - a dedicated Java server with an atomically persisted world;
 - authenticated, reconnectable player identities;
 - an in-game first-join flow for a permanent, uniquely named ruler, kingdom, and
-  capital, followed by server-assigned isolated placement;
+  capital, followed by server-validated isolated placement;
 - one server-owned four-city cluster per player: the player capital and exactly
   three nearby persistent neutral PvE settlements;
 - a 64-tile minimum distance between player capitals, no player-selected nearby
@@ -60,9 +68,44 @@ This repository currently contains the V0.14 playable shared-world vertical slic
 
 The map panel is currently a multiplayer overlay; it does **not** yet insert
 remote cities as interactive regions into the vanilla world map. That deeper
-client integration is the next major milestone. The original Syx Together source
-supplied for reference remains in the ignored `reference/` directory; none of its
-copied game-class overrides are packaged into this mod.
+client integration is the next major milestone. The optional local `reference/`
+directory is ignored by Git and is not included in a checkout. It may hold the
+original Syx Together source for comparison; none of its copied game-class
+overrides are packaged into this mod.
+
+## Repository guide
+
+The current implementation lives on the `Syx-online` default branch. This is an
+experimental source checkout; use the build instructions below to produce
+installable artifacts and review the documented limitations before deployment.
+
+| Path | Role |
+| --- | --- |
+| [`src/common/java/`](src/common/java) | Shared wire protocol, world constants, and terrain model |
+| [`src/server/java/`](src/server/java) | Dedicated server, strategic simulation, and persistence |
+| [`src/mod/java/`](src/mod/java) | In-game multiplayer client and overlay |
+| [`src/launcher/java/`](src/launcher/java) and [`src/launcher-patch/java/`](src/launcher-patch/java) | Dedicated online entry point and exact-V71 runtime patches |
+| [`src/test/java/`](src/test/java) and [`src/mod-test/java/`](src/mod-test/java) | Protocol, server, persistence, soak, and client smoke tests |
+| [`mod/`](mod) | Mod metadata, default configuration, and canonical heightmap |
+| [`world/`](world) | Immutable native world template used by the launcher |
+| [`server/`](server) | Dedicated-server configuration |
+| [`launcher/`](launcher) | Launcher manifest and distribution entry script |
+| [`tools/`](tools) | Build, test, installation, launch, backup, and moderation scripts |
+| [`Dockerfile`](Dockerfile) and [`compose.yml`](compose.yml) | Dedicated-server container configuration |
+
+The heightmap in `mod/V71/` and the save in `world/` are current build inputs.
+Keep their paths and versioned names intact. Earlier implementations remain
+available in the [commit history](https://github.com/Victorp1811/Syx-Kingdoms-Online/commits/Syx-online);
+the [changelog](CHANGELOG.md) records development milestones.
+
+## Documentation
+
+| Guide | Start here when you want to… |
+| --- | --- |
+| [Architecture](ARCHITECTURE.md) | Understand client/server ownership, implementation boundaries, and remaining milestones |
+| [Online rules](ONLINE_RULES.md) | Check compatibility, gameplay restrictions, and current security limitations |
+| [Deployment](DEPLOYMENT.md) | Configure hosting, transport, persistence, and operations |
+| [Changelog](CHANGELOG.md) | Review how the current vertical slice evolved |
 
 ## Build
 
